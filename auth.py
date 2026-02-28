@@ -18,6 +18,7 @@ from collections import defaultdict
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_headers
+from starlette.responses import JSONResponse
 from user_context import current_api_key
 
 logger = logging.getLogger(__name__)
@@ -122,7 +123,9 @@ class BearerAuthMiddleware(Middleware):
 
         if not auth_header.lower().startswith("bearer "):
             logger.warning("Rejected request — missing or malformed Authorization header")
-            raise ValueError("Unauthorized: missing Bearer token")
+            raise ValueError(
+                "Unauthorized: missing Bearer token",
+            )
 
         token = auth_header.split(" ", 1)[1]
 

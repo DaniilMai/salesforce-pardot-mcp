@@ -21,6 +21,14 @@ from starlette.responses import JSONResponse
 from auth import BearerAuthMiddleware
 from tools import ALL_TOOLS
 from oauth import oauth_login, oauth_callback, oauth_status, oauth_revoke
+from mcp_oauth import (
+    protected_resource_metadata,
+    authorization_server_metadata,
+    oauth_authorize,
+    mcp_oauth_callback,
+    oauth_token,
+    oauth_register,
+)
 
 # Load .env for local development (no-op if .env is absent)
 # Use explicit path so it works regardless of working directory (e.g. stdio via Claude Desktop)
@@ -83,7 +91,37 @@ async def health_check(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Self-service OAuth endpoints
+# MCP OAuth endpoints (RFC 9728 / RFC 8414)
+# ---------------------------------------------------------------------------
+
+
+@mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
+async def _protected_resource(request: Request):
+    return await protected_resource_metadata(request)
+
+
+@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
+async def _auth_server_metadata(request: Request):
+    return await authorization_server_metadata(request)
+
+
+@mcp.custom_route("/oauth/authorize", methods=["GET"])
+async def _oauth_authorize(request: Request):
+    return await oauth_authorize(request)
+
+
+@mcp.custom_route("/oauth/token", methods=["POST"])
+async def _oauth_token(request: Request):
+    return await oauth_token(request)
+
+
+@mcp.custom_route("/oauth/register", methods=["POST"])
+async def _oauth_register(request: Request):
+    return await oauth_register(request)
+
+
+# ---------------------------------------------------------------------------
+# Self-service OAuth endpoints (legacy fallback)
 # ---------------------------------------------------------------------------
 
 
@@ -94,6 +132,11 @@ async def _login(request: Request):
 
 @mcp.custom_route("/oauth/callback", methods=["GET"])
 async def _oauth_callback(request: Request):
+    # Try MCP OAuth flow first (returns None if not an MCP flow)
+    mcp_result = await mcp_oauth_callback(request)
+    if mcp_result is not None:
+        return mcp_result
+    # Fall through to legacy callback
     return await oauth_callback(request)
 
 

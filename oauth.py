@@ -144,50 +144,119 @@ _SUCCESS_HTML = """\
            background: #f5f5f5; display: flex; justify-content: center; align-items: center;
            min-height: 100vh; padding: 20px; }}
     .card {{ background: white; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1);
-             max-width: 600px; width: 100%; padding: 40px; }}
+             max-width: 640px; width: 100%; padding: 40px; }}
     h1 {{ color: #1a1a1a; font-size: 24px; margin-bottom: 8px; }}
     .subtitle {{ color: #666; margin-bottom: 24px; }}
+    .step {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
+             padding: 20px; margin-bottom: 16px; }}
+    .step-header {{ display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }}
+    .step-number {{ background: #0070d2; color: white; width: 28px; height: 28px;
+                     border-radius: 50%; display: flex; align-items: center; justify-content: center;
+                     font-size: 14px; font-weight: 600; flex-shrink: 0; }}
+    .step-title {{ font-size: 16px; font-weight: 600; color: #1a1a1a; }}
+    .step-desc {{ color: #555; font-size: 14px; line-height: 1.5; margin-left: 40px; }}
+    .btn {{ border: none; border-radius: 8px; padding: 12px 24px; font-size: 15px;
+             cursor: pointer; width: 100%; font-weight: 600; transition: all 0.2s; }}
+    .btn-primary {{ background: #0070d2; color: white; }}
+    .btn-primary:hover {{ background: #005bb5; }}
+    .btn-secondary {{ background: #f0f4f8; color: #0070d2; border: 2px solid #0070d2;
+                       margin-top: 8px; }}
+    .btn-secondary:hover {{ background: #e8eef4; }}
+    .btn.done {{ background: #2e844a; color: white; border-color: #2e844a; }}
+    .path-box {{ background: #f0f4f8; border: 1px solid #d0d7de; border-radius: 6px;
+                  padding: 10px 14px; margin: 8px 0; font-family: 'SF Mono', Monaco, Consolas, monospace;
+                  font-size: 12px; color: #333; word-break: break-all; }}
+    .os-tabs {{ display: flex; gap: 0; margin: 8px 0 4px 0; }}
+    .os-tab {{ padding: 6px 16px; font-size: 13px; cursor: pointer; background: #e2e8f0;
+                color: #555; border: none; font-weight: 500; }}
+    .os-tab:first-child {{ border-radius: 6px 0 0 6px; }}
+    .os-tab:last-child {{ border-radius: 0 6px 6px 0; }}
+    .os-tab.active {{ background: #0070d2; color: white; }}
+    .hidden {{ display: none; }}
     .token-box {{ background: #f0f4f8; border: 1px solid #d0d7de; border-radius: 8px;
-                   padding: 16px; margin: 16px 0; position: relative; }}
+                   padding: 16px; margin: 12px 0; }}
     .token-label {{ font-size: 12px; color: #666; text-transform: uppercase;
                      letter-spacing: 0.5px; margin-bottom: 8px; }}
     .token-value {{ font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 13px;
                      word-break: break-all; color: #1a1a1a; user-select: all; }}
-    .copy-btn {{ background: #0070d2; color: white; border: none; border-radius: 6px;
-                  padding: 10px 20px; font-size: 14px; cursor: pointer; margin-top: 12px;
-                  width: 100%; }}
-    .copy-btn:hover {{ background: #005bb5; }}
-    .copy-btn.copied {{ background: #2e844a; }}
-    .instructions {{ margin-top: 24px; }}
-    .instructions h2 {{ font-size: 16px; color: #1a1a1a; margin-bottom: 12px; }}
-    .instructions ol {{ padding-left: 20px; color: #444; }}
-    .instructions li {{ margin-bottom: 8px; line-height: 1.5; }}
-    code {{ background: #f0f4f8; padding: 2px 6px; border-radius: 4px;
-            font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 13px; }}
     .config-block {{ background: #1e1e1e; color: #d4d4d4; border-radius: 8px;
                       padding: 16px; margin: 12px 0; font-family: 'SF Mono', Monaco, Consolas, monospace;
                       font-size: 12px; overflow-x: auto; white-space: pre; }}
+    .divider {{ border-top: 1px solid #e2e8f0; margin: 24px 0; }}
     .instance {{ color: #666; font-size: 13px; margin-top: 16px; }}
+    .collapsible {{ cursor: pointer; color: #0070d2; font-size: 13px; margin-top: 12px;
+                     display: inline-block; }}
+    .collapsible:hover {{ text-decoration: underline; }}
+    .expire-note {{ color: #888; font-size: 12px; margin-top: 12px; line-height: 1.4; }}
   </style>
 </head>
 <body>
   <div class="card">
     <h1>Connected to Salesforce</h1>
-    <p class="subtitle">Your session token is ready. Copy it and add it to Claude Desktop.</p>
+    <p class="subtitle">Follow these 3 steps to connect Claude Desktop to your Salesforce.</p>
 
-    <div class="token-box">
-      <div class="token-label">Session Token</div>
-      <div class="token-value" id="token">{session_token}</div>
+    <!-- Step 1: Download -->
+    <div class="step">
+      <div class="step-header">
+        <div class="step-number">1</div>
+        <div class="step-title">Download config file</div>
+      </div>
+      <div class="step-desc">
+        Click the button below to download the ready-made configuration file.
+      </div>
+      <br>
+      <button class="btn btn-primary" id="downloadBtn" onclick="downloadConfig()">Download claude_desktop_config.json</button>
     </div>
-    <button class="copy-btn" id="copyBtn" onclick="copyToken()">Copy Token</button>
 
-    <div class="instructions">
-      <h2>Setup Instructions</h2>
-      <ol>
-        <li>Open Claude Desktop settings</li>
-        <li>Go to <strong>Developer</strong> &rarr; <strong>Edit Config</strong></li>
-        <li>Add (or update) the MCP server entry:</li>
-      </ol>
+    <!-- Step 2: Place file -->
+    <div class="step">
+      <div class="step-header">
+        <div class="step-number">2</div>
+        <div class="step-title">Place the file in the right folder</div>
+      </div>
+      <div class="step-desc">
+        Move the downloaded file to this folder (replace if it already exists):
+        <div class="os-tabs">
+          <button class="os-tab active" onclick="showOS('mac')">macOS</button>
+          <button class="os-tab" onclick="showOS('win')">Windows</button>
+        </div>
+        <div class="path-box" id="path-mac">~/Library/Application Support/Claude/</div>
+        <div class="path-box hidden" id="path-win">%APPDATA%\\Claude\\</div>
+        <button class="btn btn-secondary" onclick="copyPath()">Copy folder path</button>
+      </div>
+    </div>
+
+    <!-- Step 3: Restart -->
+    <div class="step">
+      <div class="step-header">
+        <div class="step-number">3</div>
+        <div class="step-title">Restart Claude Desktop</div>
+      </div>
+      <div class="step-desc">
+        Fully close Claude Desktop and reopen it. You should see a hammer icon in the chat
+        &mdash; that means Salesforce tools are connected.
+      </div>
+    </div>
+
+    <p class="expire-note">
+      Your session token expires in 24 hours. After that, visit this login page again
+      to get a new config file.
+    </p>
+
+    <div class="divider"></div>
+
+    <!-- Advanced: manual setup -->
+    <span class="collapsible" onclick="toggleAdvanced()">Advanced: manual setup &darr;</span>
+    <div id="advanced" class="hidden" style="margin-top: 12px;">
+      <div class="token-box">
+        <div class="token-label">Session Token</div>
+        <div class="token-value" id="token">{session_token}</div>
+      </div>
+      <button class="btn btn-secondary" onclick="copyToken()">Copy Token</button>
+      <p style="margin-top:12px; font-size:13px; color:#555;">
+        Or copy the full config and paste it into
+        <strong>Claude Desktop &rarr; Settings &rarr; Developer &rarr; Edit Config</strong>:
+      </p>
       <div class="config-block">{{
   "mcpServers": {{
     "salesforce": {{
@@ -198,23 +267,84 @@ _SUCCESS_HTML = """\
     }}
   }}
 }}</div>
-      <ol start="4">
-        <li>Save and restart Claude Desktop</li>
-      </ol>
+      <button class="btn btn-secondary" onclick="copyConfig()">Copy Config JSON</button>
     </div>
 
     <p class="instance">Connected org: <strong>{instance_url}</strong></p>
   </div>
 
   <script>
+    const CONFIG_JSON = JSON.stringify({{
+      "mcpServers": {{
+        "salesforce": {{
+          "url": "{server_url}/sse",
+          "headers": {{
+            "Authorization": "Bearer {session_token}"
+          }}
+        }}
+      }}
+    }}, null, 2);
+
+    let currentOS = 'mac';
+
+    function downloadConfig() {{
+      const blob = new Blob([CONFIG_JSON], {{ type: 'application/json' }});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'claude_desktop_config.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      const btn = document.getElementById('downloadBtn');
+      btn.textContent = 'Downloaded!';
+      btn.classList.add('done');
+      setTimeout(() => {{ btn.textContent = 'Download claude_desktop_config.json'; btn.classList.remove('done'); }}, 2000);
+    }}
+
+    function showOS(os) {{
+      currentOS = os;
+      document.querySelectorAll('.os-tab').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      document.getElementById('path-mac').classList.toggle('hidden', os !== 'mac');
+      document.getElementById('path-win').classList.toggle('hidden', os !== 'win');
+    }}
+
+    function copyPath() {{
+      const path = currentOS === 'mac'
+        ? '~/Library/Application Support/Claude/'
+        : '%APPDATA%\\\\Claude\\\\';
+      navigator.clipboard.writeText(path).then(() => {{
+        event.target.textContent = 'Copied!';
+        event.target.classList.add('done');
+        setTimeout(() => {{ event.target.textContent = 'Copy folder path'; event.target.classList.remove('done'); }}, 2000);
+      }});
+    }}
+
     function copyToken() {{
       const token = document.getElementById('token').textContent;
       navigator.clipboard.writeText(token).then(() => {{
-        const btn = document.getElementById('copyBtn');
-        btn.textContent = 'Copied!';
-        btn.classList.add('copied');
-        setTimeout(() => {{ btn.textContent = 'Copy Token'; btn.classList.remove('copied'); }}, 2000);
+        event.target.textContent = 'Copied!';
+        event.target.classList.add('done');
+        setTimeout(() => {{ event.target.textContent = 'Copy Token'; event.target.classList.remove('done'); }}, 2000);
       }});
+    }}
+
+    function copyConfig() {{
+      navigator.clipboard.writeText(CONFIG_JSON).then(() => {{
+        event.target.textContent = 'Copied!';
+        event.target.classList.add('done');
+        setTimeout(() => {{ event.target.textContent = 'Copy Config JSON'; event.target.classList.remove('done'); }}, 2000);
+      }});
+    }}
+
+    function toggleAdvanced() {{
+      const el = document.getElementById('advanced');
+      el.classList.toggle('hidden');
+      event.target.innerHTML = el.classList.contains('hidden')
+        ? 'Advanced: manual setup &darr;'
+        : 'Advanced: manual setup &uarr;';
     }}
   </script>
 </body>
