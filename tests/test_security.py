@@ -610,7 +610,7 @@ class TestTokenStore(unittest.TestCase):
                         "access_token": "at-123",
                         "refresh_token": "rt-456",
                         "instance_url": "https://test.my.salesforce.com",
-                        "issued_at": 1234567890.0,
+                        "issued_at": time.time(),
                         "pardot_business_unit_id": None,
                     }
                     store.put("api-key-1", tokens)
@@ -635,7 +635,7 @@ class TestTokenStore(unittest.TestCase):
                         "access_token": "at-123",
                         "refresh_token": "rt-456",
                         "instance_url": "https://test.my.salesforce.com",
-                        "issued_at": 1234567890.0,
+                        "issued_at": time.time(),
                         "pardot_business_unit_id": None,
                     }
                     store.put("api-key-1", tokens)

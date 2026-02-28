@@ -268,6 +268,20 @@ async def pardot_get_prospect_by_email(
     return {"prospect": prospects[0]}
 
 
+# Pardot fields that cannot be changed through update tools
+BLOCKED_PROSPECT_FIELDS: frozenset[str] = frozenset(
+    {"email", "score", "grade", "isDoNotEmail", "isDoNotCall",
+     "salesforceId", "crmContactFid", "crmLeadFid"}
+)
+
+
+def _check_blocked_prospect_fields(fields: dict) -> None:
+    """Raise ToolError if any field key is in the blocked set."""
+    found = {k for k in fields if k in BLOCKED_PROSPECT_FIELDS}
+    if found:
+        raise ToolError(f"Cannot update protected Prospect fields: {found}")
+
+
 async def pardot_update_prospect(
     prospect_id: Annotated[str, Field(description="Pardot prospect ID to update")],
     fields: Annotated[
@@ -275,7 +289,7 @@ async def pardot_update_prospect(
         Field(
             description=(
                 "Dictionary of fields to update, "
-                "e.g. {'firstName': 'Jane', 'score': 50}"
+                "e.g. {'firstName': 'Jane', 'company': 'Acme Inc.'}"
             )
         ),
     ],
@@ -284,6 +298,7 @@ async def pardot_update_prospect(
     client = get_pardot_client()
     if not prospect_id or not fields:
         raise ToolError("Both prospect_id and fields are required")
+    _check_blocked_prospect_fields(fields)
     result = await client.patch(f"prospects/{prospect_id}", json_body=fields)
     return {"success": True, "prospect": result}
 
