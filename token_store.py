@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 TOKEN_FILE = Path(__file__).parent / "data" / "tokens.json.enc"
 
+# Session tokens expire after 24 hours (configurable via env var)
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", 86400))
+
 
 class UserTokens(TypedDict):
     access_token: str
@@ -85,11 +88,22 @@ class TokenStore:
         self._cache = data
 
     def get(self, api_key: str) -> UserTokens | None:
-        """Get stored tokens for an API key, or None if not connected."""
+        """Get stored tokens for an API key, or None if not connected or expired."""
         hk = _hash_key(api_key)
         with self._lock:
             data = self._load()
-            return data.get(hk)
+            tokens = data.get(hk)
+            if tokens is None:
+                return None
+            # Check session TTL
+            import time
+            issued = tokens.get("issued_at", 0)
+            if time.time() - issued > SESSION_TTL_SECONDS:
+                logger.info("Session expired (TTL %ds) for key hash %s", SESSION_TTL_SECONDS, hk[:8])
+                del data[hk]
+                self._save(data)
+                return None
+            return tokens
 
     def put(self, api_key: str, tokens: UserTokens) -> None:
         """Store or update tokens for an API key."""
@@ -111,10 +125,8 @@ class TokenStore:
             return False
 
     def has_tokens(self, api_key: str) -> bool:
-        """Check if an API key has stored OAuth tokens."""
-        hk = _hash_key(api_key)
-        with self._lock:
-            return hk in self._load()
+        """Check if an API key has stored (non-expired) OAuth tokens."""
+        return self.get(api_key) is not None
 
 
 # Singleton (lazily initialized)

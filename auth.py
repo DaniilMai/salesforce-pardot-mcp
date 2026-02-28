@@ -108,8 +108,11 @@ class BearerAuthMiddleware(Middleware):
         context: MiddlewareContext,
         call_next,
     ):
-        # --- Skip auth for local development ---
-        if os.environ.get("SKIP_AUTH", "").lower() in ("1", "true", "yes"):
+        # --- Skip auth only in stdio mode (local Claude Desktop, not remote) ---
+        if (
+            os.environ.get("SKIP_AUTH", "").lower() in ("1", "true", "yes")
+            and os.environ.get("MCP_TRANSPORT", "sse").lower() == "stdio"
+        ):
             return await call_next(context)
 
         # --- Extract bearer token ---
