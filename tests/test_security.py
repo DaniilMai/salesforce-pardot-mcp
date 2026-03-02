@@ -878,5 +878,228 @@ class TestDualModeAuth(unittest.TestCase):
             )
 
 
+# ---------------------------------------------------------------------------
+# 20. API key hot-reload (TTL-based refresh)
+# ---------------------------------------------------------------------------
+
+class TestApiKeyHotReload(unittest.TestCase):
+    """Verify get_valid_keys refreshes after TTL expires."""
+
+    def setUp(self):
+        import auth
+        auth._valid_keys = None
+        auth._valid_keys_loaded_at = 0.0
+
+    def test_keys_refresh_after_ttl(self):
+        import auth
+        with patch.dict(os.environ, {"TEAM_API_KEYS": "key-v1"}):
+            keys = auth.get_valid_keys()
+            self.assertIn("key-v1", keys)
+
+        # Simulate TTL expiry
+        auth._valid_keys_loaded_at = time.monotonic() - 301
+
+        with patch.dict(os.environ, {"TEAM_API_KEYS": "key-v2"}):
+            keys = auth.get_valid_keys()
+            self.assertIn("key-v2", keys)
+            self.assertNotIn("key-v1", keys)
+
+    def test_keys_cached_within_ttl(self):
+        import auth
+        with patch.dict(os.environ, {"TEAM_API_KEYS": "key-cached"}):
+            keys1 = auth.get_valid_keys()
+
+        # Within TTL, even if env changes, cache is returned
+        with patch.dict(os.environ, {"TEAM_API_KEYS": "key-new"}):
+            keys2 = auth.get_valid_keys()
+            self.assertIn("key-cached", keys2)
+
+
+# ---------------------------------------------------------------------------
+# 21. HMAC token hashing migration
+# ---------------------------------------------------------------------------
+
+class TestTokenStoreHMACMigration(unittest.TestCase):
+    """Verify tokens stored under legacy SHA-256 are auto-migrated to HMAC."""
+
+    def setUp(self):
+        from cryptography.fernet import Fernet
+        self._key = Fernet.generate_key().decode()
+
+    def test_legacy_hash_migration(self):
+        import tempfile
+        from pathlib import Path
+        import token_store
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_file = token_store.TOKEN_FILE
+            token_store.TOKEN_FILE = Path(tmpdir) / "tokens.json.enc"
+            try:
+                with patch.dict(os.environ, {"ENCRYPTION_KEY": self._key}):
+                    store = token_store.TokenStore()
+
+                    # Manually store under the legacy (unsalted) hash
+                    legacy_hash = token_store._hash_key_legacy("api-key-legacy")
+                    tokens = {
+                        "access_token": "at-legacy",
+                        "refresh_token": "rt-legacy",
+                        "instance_url": "https://test.my.salesforce.com",
+                        "issued_at": time.time(),
+                        "pardot_business_unit_id": None,
+                    }
+                    data = store._load()
+                    data[legacy_hash] = tokens
+                    store._save(data)
+                    store._cache = None  # force reload
+
+                    # Read using normal API — should find via legacy fallback
+                    result = store.get("api-key-legacy")
+                    self.assertIsNotNone(result)
+                    self.assertEqual(result["access_token"], "at-legacy")
+
+                    # After migration, the legacy key should be gone
+                    store._cache = None
+                    data = store._load()
+                    self.assertNotIn(legacy_hash, data)
+                    # New HMAC key should be present
+                    new_hash = token_store._hash_key("api-key-legacy")
+                    self.assertIn(new_hash, data)
+            finally:
+                token_store.TOKEN_FILE = original_file
+
+    def test_new_tokens_use_hmac(self):
+        import tempfile
+        from pathlib import Path
+        import token_store
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_file = token_store.TOKEN_FILE
+            token_store.TOKEN_FILE = Path(tmpdir) / "tokens.json.enc"
+            try:
+                with patch.dict(os.environ, {"ENCRYPTION_KEY": self._key}):
+                    store = token_store.TokenStore()
+                    tokens = {
+                        "access_token": "at-new",
+                        "refresh_token": "rt-new",
+                        "instance_url": "https://test.my.salesforce.com",
+                        "issued_at": time.time(),
+                        "pardot_business_unit_id": None,
+                    }
+                    store.put("new-key", tokens)
+
+                    # Verify stored under HMAC key, not legacy
+                    store._cache = None
+                    data = store._load()
+                    hmac_hash = token_store._hash_key("new-key")
+                    legacy_hash = token_store._hash_key_legacy("new-key")
+                    self.assertIn(hmac_hash, data)
+                    self.assertNotIn(legacy_hash, data)
+            finally:
+                token_store.TOKEN_FILE = original_file
+
+
+# ---------------------------------------------------------------------------
+# 22. DCR rate limiting
+# ---------------------------------------------------------------------------
+
+class TestDCRRateLimit(unittest.TestCase):
+    """Verify per-IP rate limiting on /oauth/register."""
+
+    def setUp(self):
+        import mcp_oauth
+        mcp_oauth._dcr_request_timestamps.clear()
+
+    def test_under_limit_passes(self):
+        from mcp_oauth import _check_dcr_rate_limit
+        for _ in range(10):
+            self.assertTrue(_check_dcr_rate_limit("192.168.1.1"))
+
+    def test_over_limit_blocked(self):
+        from mcp_oauth import _check_dcr_rate_limit
+        for _ in range(10):
+            _check_dcr_rate_limit("192.168.1.2")
+        self.assertFalse(_check_dcr_rate_limit("192.168.1.2"))
+
+    def test_different_ips_independent(self):
+        from mcp_oauth import _check_dcr_rate_limit
+        for _ in range(10):
+            _check_dcr_rate_limit("10.0.0.1")
+        self.assertTrue(_check_dcr_rate_limit("10.0.0.2"))
+
+
+# ---------------------------------------------------------------------------
+# 23. Large result warning (anomaly detection)
+# ---------------------------------------------------------------------------
+
+class TestLargeResultWarning(unittest.TestCase):
+    """Verify warning is logged for large result sets."""
+
+    @patch("tools.salesforce.get_sf_client")
+    def test_large_result_logs_warning(self, mock_get_client):
+        mock_sf = MagicMock()
+        mock_sf.query_all.return_value = {"totalSize": 1500, "records": []}
+        mock_get_client.return_value = mock_sf
+
+        from tools.salesforce import sf_query
+        with self.assertLogs("tools.salesforce", level="WARNING") as cm:
+            sf_query("SELECT Id FROM Lead")
+        self.assertTrue(any("Large result set" in msg for msg in cm.output))
+
+    @patch("tools.salesforce.get_sf_client")
+    def test_small_result_no_warning(self, mock_get_client):
+        mock_sf = MagicMock()
+        mock_sf.query_all.return_value = {"totalSize": 5, "records": [{"Id": "001"}] * 5}
+        mock_get_client.return_value = mock_sf
+
+        from tools.salesforce import sf_query
+        # Should not log any warnings
+        result = sf_query("SELECT Id FROM Lead")
+        self.assertEqual(result["totalSize"], 5)
+
+
+# ---------------------------------------------------------------------------
+# 24. Output sanitization (truncation + data source markers)
+# ---------------------------------------------------------------------------
+
+class TestOutputSanitization(unittest.TestCase):
+    """Verify result truncation and _dataSource markers."""
+
+    @patch("tools.salesforce.get_sf_client")
+    def test_data_source_marker_present(self, mock_get_client):
+        mock_sf = MagicMock()
+        mock_sf.query_all.return_value = {"totalSize": 1, "records": [{"Id": "001"}]}
+        mock_get_client.return_value = mock_sf
+
+        from tools.salesforce import sf_query
+        result = sf_query("SELECT Id FROM Lead")
+        self.assertEqual(result["_dataSource"], "salesforce")
+
+    @patch("tools.salesforce.get_sf_client")
+    def test_large_result_truncated(self, mock_get_client):
+        mock_sf = MagicMock()
+        records = [{"Id": f"00{i}"} for i in range(600)]
+        mock_sf.query_all.return_value = {"totalSize": 600, "records": records}
+        mock_get_client.return_value = mock_sf
+
+        from tools.salesforce import sf_query, MAX_RESULT_RECORDS
+        result = sf_query("SELECT Id FROM Lead")
+        self.assertEqual(result["returnedSize"], MAX_RESULT_RECORDS)
+        self.assertEqual(len(result["records"]), MAX_RESULT_RECORDS)
+        self.assertIn("warning", result)
+        self.assertIn("truncated", result["warning"].lower())
+
+    @patch("tools.salesforce.get_sf_client")
+    def test_small_result_not_truncated(self, mock_get_client):
+        mock_sf = MagicMock()
+        records = [{"Id": f"00{i}"} for i in range(10)]
+        mock_sf.query_all.return_value = {"totalSize": 10, "records": records}
+        mock_get_client.return_value = mock_sf
+
+        from tools.salesforce import sf_query
+        result = sf_query("SELECT Id FROM Lead")
+        self.assertEqual(result["returnedSize"], 10)
+        self.assertNotIn("warning", result)
+
+
 if __name__ == "__main__":
     unittest.main()

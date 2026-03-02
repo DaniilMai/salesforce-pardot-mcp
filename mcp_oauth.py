@@ -24,6 +24,7 @@ import time
 import logging
 import secrets
 import urllib.parse
+from collections import defaultdict
 
 import httpx
 from starlette.requests import Request
@@ -50,6 +51,10 @@ MAX_PENDING_CODES = 500
 MAX_REGISTERED_CLIENTS = 200
 MAX_REFRESH_TOKENS = 1000
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", 86400))
+
+# Rate limiting for /oauth/register (per-IP sliding window)
+DCR_MAX_REQUESTS_PER_MINUTE = 10
+_dcr_request_timestamps: dict[str, list[float]] = defaultdict(list)
 
 # ---------------------------------------------------------------------------
 # In-memory stores
@@ -151,6 +156,17 @@ def _sanitize_client_name(name: str) -> str:
     # Strip control characters and limit length
     sanitized = "".join(c for c in name if c.isprintable())
     return sanitized[:100] or "unnamed"
+
+
+def _check_dcr_rate_limit(client_ip: str) -> bool:
+    """Check per-IP rate limit for DCR endpoint. Returns True if allowed."""
+    now = time.monotonic()
+    window = [t for t in _dcr_request_timestamps[client_ip] if now - t < 60]
+    if len(window) >= DCR_MAX_REQUESTS_PER_MINUTE:
+        return False
+    window.append(now)
+    _dcr_request_timestamps[client_ip] = window
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +621,15 @@ async def _handle_refresh_token(form) -> JSONResponse:
 
 async def oauth_register(request: Request) -> JSONResponse:
     """Register a dynamic OAuth client (used by Claude Desktop on first connect)."""
+    # Per-IP rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+    if not _check_dcr_rate_limit(client_ip):
+        logger.warning("DCR rate limit exceeded for IP: %s", client_ip)
+        return JSONResponse(
+            {"error": "rate_limit_exceeded", "error_description": "Too many registration requests, try again later"},
+            status_code=429,
+        )
+
     try:
         body = await request.json()
     except Exception:

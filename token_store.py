@@ -12,6 +12,7 @@ Generate a key with:
 """
 
 import hashlib
+import hmac
 import json
 import os
 import logging
@@ -38,9 +39,20 @@ class UserTokens(TypedDict):
     pardot_business_unit_id: str | None  # None = use shared env var
 
 
-def _hash_key(api_key: str) -> str:
-    """Hash API key with SHA-256 for use as dict key (avoids storing plaintext keys)."""
+def _hash_key_legacy(api_key: str) -> str:
+    """Legacy: unsalted SHA-256 hash (used for reading old tokens during migration)."""
     return hashlib.sha256(api_key.encode()).hexdigest()
+
+
+def _get_hmac_secret() -> bytes:
+    """Derive an HMAC secret from the ENCRYPTION_KEY env var."""
+    enc_key = os.environ.get("ENCRYPTION_KEY", "")
+    return hashlib.sha256(f"hmac-salt:{enc_key}".encode()).digest()
+
+
+def _hash_key(api_key: str) -> str:
+    """HMAC-SHA256 keyed hash for use as dict key (prevents rainbow table attacks)."""
+    return hmac.new(_get_hmac_secret(), api_key.encode(), hashlib.sha256).hexdigest()
 
 
 class TokenStore:
@@ -90,9 +102,19 @@ class TokenStore:
     def get(self, api_key: str) -> UserTokens | None:
         """Get stored tokens for an API key, or None if not connected or expired."""
         hk = _hash_key(api_key)
+        hk_legacy = _hash_key_legacy(api_key)
         with self._lock:
             data = self._load()
             tokens = data.get(hk)
+
+            # Fallback: check legacy (unsalted) hash and auto-migrate
+            if tokens is None and hk_legacy in data:
+                tokens = data[hk_legacy]
+                data[hk] = tokens
+                del data[hk_legacy]
+                self._save(data)
+                logger.info("Migrated token store entry from legacy hash to HMAC hash")
+
             if tokens is None:
                 return None
             # Check session TTL
@@ -116,13 +138,19 @@ class TokenStore:
     def delete(self, api_key: str) -> bool:
         """Remove tokens for an API key. Returns True if found."""
         hk = _hash_key(api_key)
+        hk_legacy = _hash_key_legacy(api_key)
         with self._lock:
             data = self._load()
+            found = False
             if hk in data:
                 del data[hk]
+                found = True
+            if hk_legacy in data:
+                del data[hk_legacy]
+                found = True
+            if found:
                 self._save(data)
-                return True
-            return False
+            return found
 
     def has_tokens(self, api_key: str) -> bool:
         """Check if an API key has stored (non-expired) OAuth tokens."""

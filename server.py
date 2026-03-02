@@ -181,5 +181,11 @@ if __name__ == "__main__":
                 uvicorn_config={"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile},
             )
         else:
-            logger.info("Starting Salesforce-Pardot MCP server on port %d (SSE)", port)
+            logger.warning(
+                "Starting Salesforce-Pardot MCP server on port %d (SSE) WITHOUT TLS. "
+                "Bearer tokens will be transmitted in cleartext. Set SSL_CERTFILE and "
+                "SSL_KEYFILE environment variables to enable HTTPS, or use a TLS-terminating "
+                "reverse proxy (e.g. Railway, Nginx).",
+                port,
+            )
             mcp.run(transport="sse", host="0.0.0.0", port=port)

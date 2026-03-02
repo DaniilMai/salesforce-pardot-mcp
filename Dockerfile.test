@@ -22,5 +22,10 @@ RUN pip install --no-cache-dir -r requirements.txt pytest
 
 COPY . .
 
+# Security: run as non-root user
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser \
+    && chown -R appuser:appgroup /app
+USER appuser
+
 # Default: run all tests
 CMD ["python", "-m", "pytest", "tests/", "-v", "--tb=short"]

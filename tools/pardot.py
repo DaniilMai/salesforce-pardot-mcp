@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 PARDOT_BASE_URL = "https://pi.pardot.com/api/v5/objects"
 TOKEN_TTL_SECONDS = 55 * 60  # 55 minutes
 
+# Anomaly detection & output sanitization
+LARGE_RESULT_THRESHOLD = 1000
+MAX_RESULT_RECORDS = 500
+
+
+def _warn_large_result(tool_name: str, count: int) -> None:
+    """Log a warning if a Pardot query returned an unusually large result set."""
+    if count > LARGE_RESULT_THRESHOLD:
+        logger.warning(
+            "Large result set from %s: %d records returned (threshold: %d)",
+            tool_name, count, LARGE_RESULT_THRESHOLD,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Pardot HTTP client with token caching
@@ -268,7 +281,14 @@ async def pardot_get_prospects(
             p for p in prospects if str(p.get("campaignId", "")) == str(campaign_id)
         ]
 
-    return {"count": len(prospects), "prospects": prospects}
+    _warn_large_result("pardot_get_prospects", len(prospects))
+    truncated = len(prospects) > MAX_RESULT_RECORDS
+    if truncated:
+        prospects = prospects[:MAX_RESULT_RECORDS]
+    result = {"count": len(prospects), "prospects": prospects, "_dataSource": "pardot"}
+    if truncated:
+        result["warning"] = f"Result truncated to {MAX_RESULT_RECORDS} records. Use filters to narrow your query."
+    return result
 
 
 async def pardot_get_prospect_by_email(
@@ -382,7 +402,15 @@ async def pardot_get_visitor_activities(
         params["createdBefore"] = created_before
 
     result = await client.get("visitor-activities", params=params)
-    return {"activities": result.get("values", [])}
+    activities = result.get("values", [])
+    _warn_large_result("pardot_get_visitor_activities", len(activities))
+    truncated = len(activities) > MAX_RESULT_RECORDS
+    if truncated:
+        activities = activities[:MAX_RESULT_RECORDS]
+    output = {"activities": activities, "_dataSource": "pardot"}
+    if truncated:
+        output["warning"] = f"Result truncated to {MAX_RESULT_RECORDS} records. Use filters to narrow your query."
+    return output
 
 
 async def pardot_get_form_handlers() -> dict:

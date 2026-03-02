@@ -154,6 +154,43 @@ def _refresh_oauth_token(tokens: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Anomaly detection & output sanitization
+# ---------------------------------------------------------------------------
+
+LARGE_RESULT_THRESHOLD = 1000
+MAX_RESULT_RECORDS = 500
+
+
+def _warn_large_result(tool_name: str, total_size: int) -> None:
+    """Log a warning if a query returned an unusually large result set."""
+    if total_size > LARGE_RESULT_THRESHOLD:
+        logger.warning(
+            "Large result set from %s: %d records returned (threshold: %d)",
+            tool_name, total_size, LARGE_RESULT_THRESHOLD,
+        )
+
+
+def _sanitize_result(records: list, total_size: int, tool_name: str) -> dict:
+    """Truncate large result sets and add data-source markers."""
+    truncated = len(records) > MAX_RESULT_RECORDS
+    if truncated:
+        records = records[:MAX_RESULT_RECORDS]
+
+    result = {
+        "totalSize": total_size,
+        "returnedSize": len(records),
+        "records": records,
+        "_dataSource": "salesforce",
+    }
+    if truncated:
+        result["warning"] = (
+            f"Result truncated: showing {MAX_RESULT_RECORDS} of {total_size} records. "
+            "Refine your query with additional filters to see specific records."
+        )
+    return result
+
+
 def _escape_soql(value: str) -> str:
     """Escape a string value for safe inclusion in a SOQL WHERE clause."""
     return value.replace("\\", "\\\\").replace("'", "\\'")
@@ -232,10 +269,8 @@ def sf_query(
     sf = get_sf_client()
     try:
         result = _safe_query(sf, soql)
-        return {
-            "totalSize": result["totalSize"],
-            "records": result["records"],
-        }
+        _warn_large_result("sf_query", result["totalSize"])
+        return _sanitize_result(result["records"], result["totalSize"], "sf_query")
     except SalesforceError as exc:
         raise ToolError(f"SOQL query failed: {exc}")
 
@@ -270,7 +305,8 @@ def sf_get_leads(
 
     try:
         result = _safe_query(sf, soql)
-        return {"totalSize": result["totalSize"], "records": result["records"]}
+        _warn_large_result("sf_get_leads", result["totalSize"])
+        return _sanitize_result(result["records"], result["totalSize"], "sf_get_leads")
     except SalesforceError as exc:
         raise ToolError(f"Failed to get leads: {exc}")
 
@@ -302,7 +338,8 @@ def sf_get_contacts(
 
     try:
         result = _safe_query(sf, soql)
-        return {"totalSize": result["totalSize"], "records": result["records"]}
+        _warn_large_result("sf_get_contacts", result["totalSize"])
+        return _sanitize_result(result["records"], result["totalSize"], "sf_get_contacts")
     except SalesforceError as exc:
         raise ToolError(f"Failed to get contacts: {exc}")
 
@@ -462,7 +499,8 @@ def sf_get_tasks(
 
     try:
         result = _safe_query(sf, soql)
-        return {"totalSize": result["totalSize"], "records": result["records"]}
+        _warn_large_result("sf_get_tasks", result["totalSize"])
+        return _sanitize_result(result["records"], result["totalSize"], "sf_get_tasks")
     except SalesforceError as exc:
         raise ToolError(f"Failed to get tasks: {exc}")
 
@@ -499,7 +537,8 @@ def sf_get_events(
 
     try:
         result = _safe_query(sf, soql)
-        return {"totalSize": result["totalSize"], "records": result["records"]}
+        _warn_large_result("sf_get_events", result["totalSize"])
+        return _sanitize_result(result["records"], result["totalSize"], "sf_get_events")
     except SalesforceError as exc:
         raise ToolError(f"Failed to get events: {exc}")
 
@@ -544,12 +583,23 @@ def sf_get_activity_history(
 
         combined = sorted(tasks + events, key=lambda r: r.get("sort_date", ""), reverse=True)
 
-        return {
+        total = task_result["totalSize"] + event_result["totalSize"]
+        _warn_large_result("sf_get_activity_history", total)
+
+        truncated = len(combined) > MAX_RESULT_RECORDS
+        if truncated:
+            combined = combined[:MAX_RESULT_RECORDS]
+
+        result = {
             "record_id": record_id,
             "task_count": task_result["totalSize"],
             "event_count": event_result["totalSize"],
-            "total_count": task_result["totalSize"] + event_result["totalSize"],
+            "total_count": total,
             "activities": combined,
+            "_dataSource": "salesforce",
         }
+        if truncated:
+            result["warning"] = f"Activities truncated to {MAX_RESULT_RECORDS} records."
+        return result
     except SalesforceError as exc:
         raise ToolError(f"Failed to get activity history: {exc}")
