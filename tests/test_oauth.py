@@ -68,11 +68,11 @@ class TestOAuthCallback(unittest.TestCase):
     def test_successful_callback_returns_html_with_token(self, mock_client_cls, mock_store):
         import asyncio
         import time
-        from oauth import oauth_callback, _pending_states
+        from oauth import oauth_callback, _oauth_state_store
 
         # Set up a valid pending state
         state = "test-valid-state"
-        _pending_states[state] = time.time()
+        _oauth_state_store().put_oauth_state(state, time.time())
 
         # Mock token store
         store_instance = MagicMock()

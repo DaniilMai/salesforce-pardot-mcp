@@ -1,13 +1,14 @@
 """
 Encrypted token storage for per-user Salesforce OAuth credentials.
 
-Stores a mapping of API key -> {access_token, refresh_token, instance_url, ...}
-encrypted at rest using Fernet symmetric encryption (cryptography library).
+Supports two backends:
+  - FileTokenStore: Fernet-encrypted JSON file (data/tokens.json.enc)
+  - RedisTokenStore: Fernet-encrypted values in Redis with native TTL
 
-Storage file: data/tokens.json.enc
-Encryption key: ENCRYPTION_KEY env var (Fernet key, 32 bytes URL-safe base64)
+Backend is selected automatically based on the REDIS_URL env var.
+Both require ENCRYPTION_KEY for at-rest encryption.
 
-Generate a key with:
+Generate an encryption key with:
     python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 """
 
@@ -17,7 +18,9 @@ import json
 import os
 import logging
 import tempfile
+import time
 import threading
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TypedDict
 
@@ -55,8 +58,38 @@ def _hash_key(api_key: str) -> str:
     return hmac.new(_get_hmac_secret(), api_key.encode(), hashlib.sha256).hexdigest()
 
 
-class TokenStore:
-    """Thread-safe encrypted token storage."""
+# ---------------------------------------------------------------------------
+# Abstract base
+# ---------------------------------------------------------------------------
+
+
+class TokenStoreBase(ABC):
+    """Abstract interface for token storage backends."""
+
+    @abstractmethod
+    def get(self, api_key: str) -> UserTokens | None:
+        """Get stored tokens for an API key, or None if not found/expired."""
+
+    @abstractmethod
+    def put(self, api_key: str, tokens: UserTokens) -> None:
+        """Store or update tokens for an API key."""
+
+    @abstractmethod
+    def delete(self, api_key: str) -> bool:
+        """Remove tokens for an API key. Returns True if found."""
+
+    @abstractmethod
+    def has_tokens(self, api_key: str) -> bool:
+        """Check if an API key has stored (non-expired) OAuth tokens."""
+
+
+# ---------------------------------------------------------------------------
+# File-based backend (original implementation)
+# ---------------------------------------------------------------------------
+
+
+class FileTokenStore(TokenStoreBase):
+    """Thread-safe Fernet-encrypted file-based token storage."""
 
     def __init__(self) -> None:
         key = os.environ.get("ENCRYPTION_KEY")
@@ -100,7 +133,6 @@ class TokenStore:
         self._cache = data
 
     def get(self, api_key: str) -> UserTokens | None:
-        """Get stored tokens for an API key, or None if not connected or expired."""
         hk = _hash_key(api_key)
         hk_legacy = _hash_key_legacy(api_key)
         with self._lock:
@@ -118,7 +150,6 @@ class TokenStore:
             if tokens is None:
                 return None
             # Check session TTL
-            import time
             issued = tokens.get("issued_at", 0)
             if time.time() - issued > SESSION_TTL_SECONDS:
                 logger.info("Session expired (TTL %ds) for key hash %s", SESSION_TTL_SECONDS, hk[:8])
@@ -128,7 +159,6 @@ class TokenStore:
             return tokens
 
     def put(self, api_key: str, tokens: UserTokens) -> None:
-        """Store or update tokens for an API key."""
         hk = _hash_key(api_key)
         with self._lock:
             data = self._load()
@@ -136,7 +166,6 @@ class TokenStore:
             self._save(data)
 
     def delete(self, api_key: str) -> bool:
-        """Remove tokens for an API key. Returns True if found."""
         hk = _hash_key(api_key)
         hk_legacy = _hash_key_legacy(api_key)
         with self._lock:
@@ -153,20 +182,54 @@ class TokenStore:
             return found
 
     def has_tokens(self, api_key: str) -> bool:
-        """Check if an API key has stored (non-expired) OAuth tokens."""
         return self.get(api_key) is not None
 
 
-# Singleton (lazily initialized)
-_store: TokenStore | None = None
+# ---------------------------------------------------------------------------
+# Singleton factories
+# ---------------------------------------------------------------------------
+
+_store: TokenStoreBase | None = None
 
 
-def get_token_store() -> TokenStore | None:
-    """Return the token store, or None if ENCRYPTION_KEY is not set (legacy mode)."""
+def get_token_store() -> TokenStoreBase | None:
+    """Return the token store, or None if ENCRYPTION_KEY is not set (legacy mode).
+
+    Automatically selects Redis backend if REDIS_URL is set, otherwise file-based.
+    """
     global _store
     if _store is None:
-        if os.environ.get("ENCRYPTION_KEY"):
-            _store = TokenStore()
-        else:
+        if not os.environ.get("ENCRYPTION_KEY"):
             return None
+        redis_url = os.environ.get("REDIS_URL")
+        if redis_url:
+            from redis_store import RedisTokenStore
+            _store = RedisTokenStore(redis_url)
+            logger.info("TokenStore backend: Redis")
+        else:
+            _store = FileTokenStore()
+            logger.info("TokenStore backend: file (data/tokens.json.enc)")
     return _store
+
+
+_oauth_state_store = None
+
+
+def get_oauth_state_store():
+    """Return the OAuth state store (Redis or in-memory fallback)."""
+    global _oauth_state_store
+    if _oauth_state_store is None:
+        redis_url = os.environ.get("REDIS_URL")
+        if redis_url:
+            from redis_store import RedisOAuthStateStore
+            _oauth_state_store = RedisOAuthStateStore(redis_url)
+            logger.info("OAuthStateStore backend: Redis")
+        else:
+            from redis_store import InMemoryOAuthStateStore
+            _oauth_state_store = InMemoryOAuthStateStore()
+            logger.info("OAuthStateStore backend: in-memory")
+    return _oauth_state_store
+
+
+# Backward compat alias
+TokenStore = FileTokenStore

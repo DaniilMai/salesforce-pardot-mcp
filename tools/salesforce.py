@@ -104,9 +104,12 @@ def get_sf_client() -> Salesforce:
 
     - If the current API key has stored OAuth tokens -> per-user client
     - Otherwise -> shared legacy client (env var credentials)
+
+    Proactively refreshes the SF access_token if it's near expiry.
     """
     api_key = get_current_api_key()
     if api_key:
+        ensure_fresh_sf_token(api_key)
         return _get_oauth_sf_client(api_key)
     return _get_legacy_sf_client()
 
@@ -119,6 +122,46 @@ def reset_sf_client() -> None:
         del _sf_clients[api_key]
     else:
         _sf_client_legacy = None
+
+
+# SF access_token lifetime (~2 hours). Refresh 5 minutes before expiry.
+_SF_TOKEN_LIFETIME = 2 * 60 * 60  # 7200 seconds
+_SF_REFRESH_BUFFER = 5 * 60       # 300 seconds
+
+
+def ensure_fresh_sf_token(api_key: str | None = None) -> None:
+    """Proactively refresh the SF access_token if it's near expiry.
+
+    Called before every tool invocation via get_sf_client() so that ALL
+    tools (query, update, create, Pardot) benefit from automatic refresh.
+    """
+    if api_key is None:
+        api_key = get_current_api_key()
+    if not api_key:
+        return  # legacy mode — nothing to refresh
+
+    store = get_token_store()
+    if not store:
+        return
+
+    tokens = store.get(api_key)
+    if not tokens or not tokens.get("refresh_token"):
+        return
+
+    age = _time.time() - tokens.get("issued_at", 0)
+    if age < (_SF_TOKEN_LIFETIME - _SF_REFRESH_BUFFER):
+        return  # token is still fresh
+
+    logger.info("SF token near expiry (age=%ds) — proactive refresh", int(age))
+    new_tokens = _refresh_oauth_token(tokens)
+    if new_tokens:
+        store.put(api_key, new_tokens)
+        # Evict cached client so next get_sf_client() creates one with new token
+        if api_key in _sf_clients:
+            del _sf_clients[api_key]
+        logger.info("SF token refreshed proactively")
+    else:
+        logger.warning("Proactive SF token refresh failed — will retry on next call")
 
 
 def _refresh_oauth_token(tokens: dict) -> dict | None:

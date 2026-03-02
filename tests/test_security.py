@@ -766,26 +766,31 @@ class TestInstanceUrlValidation(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestPendingStatesSecurity(unittest.TestCase):
-    """Verify _pending_states TTL cleanup and max size limit."""
+    """Verify OAuth state store TTL and size limit via state store API."""
 
     def test_expired_states_cleaned_up(self):
-        import oauth
-        oauth._pending_states.clear()
-        # Add an expired state (now stores just timestamp, not tuple)
-        oauth._pending_states["old-state"] = time.time() - 700
-        oauth._cleanup_expired_states()
-        self.assertNotIn("old-state", oauth._pending_states)
+        from oauth import _oauth_state_store
+        store = _oauth_state_store()
+        # put_oauth_state with ttl=1 means it expires almost immediately
+        store.put_oauth_state("old-state", time.time() - 700, ttl=600)
+        # InMemoryOAuthStateStore cleans up on put; pop should return None for expired
+        # (it was stored but cleanup runs on next put)
+        store.put_oauth_state("trigger-cleanup", time.time(), ttl=600)
+        # The old state was stored but since we pop it, it should still exist
+        # unless cleaned. Let's verify through pop:
+        result = store.pop_oauth_state("old-state")
+        # In InMemory, the state is stored regardless of age — it's cleaned on put
+        # The cleanup in put only removes states older than TTL, and old-state was
+        # created_at = now-700, so it should have been cleaned by the trigger put
+        # (since now - (now-700) = 700 > 600)
+        self.assertIsNone(result)
 
     def test_fresh_states_preserved(self):
-        import oauth
-        oauth._pending_states.clear()
-        oauth._pending_states["fresh-state"] = time.time()
-        oauth._cleanup_expired_states()
-        self.assertIn("fresh-state", oauth._pending_states)
-
-    def tearDown(self):
-        import oauth
-        oauth._pending_states.clear()
+        from oauth import _oauth_state_store
+        store = _oauth_state_store()
+        store.put_oauth_state("fresh-state", time.time(), ttl=600)
+        result = store.pop_oauth_state("fresh-state")
+        self.assertIsNotNone(result)
 
 
 # ---------------------------------------------------------------------------

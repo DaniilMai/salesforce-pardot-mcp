@@ -139,7 +139,7 @@ class TestOAuthAuthorize(unittest.TestCase):
         self.assertIn("S256", body["error_description"])
 
     def test_valid_params_redirects_to_salesforce(self):
-        from mcp_oauth import oauth_authorize, _auth_codes
+        from mcp_oauth import oauth_authorize
         _, challenge = _generate_pkce()
         request = _make_request(query_params={
             "client_id": "test-client",
@@ -197,13 +197,14 @@ class TestOAuthToken(unittest.TestCase):
 
     @patch("mcp_oauth.get_token_store")
     def test_valid_code_exchange(self, mock_store):
-        from mcp_oauth import oauth_token, _auth_codes, _refresh_tokens
+        from mcp_oauth import oauth_token, _state_store
 
         verifier, challenge = _generate_pkce()
+        ss = _state_store()
 
         # Plant a valid authorization code
         auth_code = "test-auth-code-123"
-        _auth_codes[auth_code] = {
+        ss.put_auth_code(auth_code, {
             "type": "code",
             "client_id": "test-client",
             "redirect_uri": "http://localhost/callback",
@@ -212,7 +213,7 @@ class TestOAuthToken(unittest.TestCase):
             "sf_refresh_token": "sf-refresh-token",
             "sf_instance_url": "https://myorg.my.salesforce.com",
             "created_at": time.time(),
-        }
+        })
 
         store_instance = MagicMock()
         mock_store.return_value = store_instance
@@ -243,21 +244,16 @@ class TestOAuthToken(unittest.TestCase):
         store_instance.put.assert_called_once()
 
         # Auth code should be consumed (single-use)
-        self.assertNotIn(auth_code, _auth_codes)
-
-        # Clean up refresh tokens created by this test
-        for rt, data in list(_refresh_tokens.items()):
-            if data["session_token"] == store_instance.put.call_args[0][0]:
-                del _refresh_tokens[rt]
+        self.assertIsNone(ss.get_auth_code(auth_code))
 
     @patch("mcp_oauth.get_token_store")
     def test_wrong_pkce_rejected(self, mock_store):
-        from mcp_oauth import oauth_token, _auth_codes
+        from mcp_oauth import oauth_token, _state_store
 
         _, challenge = _generate_pkce()
 
         auth_code = "test-auth-code-wrong-pkce"
-        _auth_codes[auth_code] = {
+        _state_store().put_auth_code(auth_code, {
             "type": "code",
             "client_id": "test-client",
             "redirect_uri": "http://localhost/callback",
@@ -266,7 +262,7 @@ class TestOAuthToken(unittest.TestCase):
             "sf_refresh_token": "sf-refresh-token",
             "sf_instance_url": "https://myorg.my.salesforce.com",
             "created_at": time.time(),
-        }
+        })
 
         store_instance = MagicMock()
         mock_store.return_value = store_instance
@@ -293,12 +289,12 @@ class TestOAuthToken(unittest.TestCase):
         store_instance.put.assert_not_called()
 
     def test_client_id_mismatch_rejected(self):
-        from mcp_oauth import oauth_token, _auth_codes
+        from mcp_oauth import oauth_token, _state_store
 
         verifier, challenge = _generate_pkce()
 
         auth_code = "test-auth-code-client-mismatch"
-        _auth_codes[auth_code] = {
+        _state_store().put_auth_code(auth_code, {
             "type": "code",
             "client_id": "original-client",
             "redirect_uri": "http://localhost/callback",
@@ -307,7 +303,7 @@ class TestOAuthToken(unittest.TestCase):
             "sf_refresh_token": "sf-refresh-token",
             "sf_instance_url": "https://myorg.my.salesforce.com",
             "created_at": time.time(),
-        }
+        })
 
         request = MagicMock()
         form_data = {
@@ -326,12 +322,12 @@ class TestOAuthToken(unittest.TestCase):
         self.assertIn("client_id", body["error_description"])
 
     def test_expired_code_rejected(self):
-        from mcp_oauth import oauth_token, _auth_codes
+        from mcp_oauth import oauth_token, _state_store
 
         verifier, challenge = _generate_pkce()
 
         auth_code = "test-expired-code"
-        _auth_codes[auth_code] = {
+        _state_store().put_auth_code(auth_code, {
             "type": "code",
             "client_id": "test-client",
             "redirect_uri": "http://localhost/callback",
@@ -340,7 +336,7 @@ class TestOAuthToken(unittest.TestCase):
             "sf_refresh_token": "sf-refresh-token",
             "sf_instance_url": "https://myorg.my.salesforce.com",
             "created_at": time.time() - 700,  # Expired (>600s)
-        }
+        })
 
         request = MagicMock()
         form_data = {
@@ -384,15 +380,17 @@ class TestOAuthRefreshToken(unittest.TestCase):
     @patch("mcp_oauth.httpx.AsyncClient")
     @patch("mcp_oauth.get_token_store")
     def test_valid_refresh_returns_new_tokens(self, mock_store, mock_client_cls):
-        from mcp_oauth import oauth_token, _refresh_tokens
+        from mcp_oauth import oauth_token, _state_store
 
-        # Set up refresh token mapping (new dict structure)
+        ss = _state_store()
+
+        # Set up refresh token mapping
         refresh_tok = "test-refresh-tok-valid"
         old_session = "old-session-token"
-        _refresh_tokens[refresh_tok] = {
+        ss.put_refresh_token(refresh_tok, {
             "session_token": old_session,
             "created_at": time.time(),
-        }
+        }, ttl=86400)
 
         # Mock token store with existing tokens
         store_instance = MagicMock()
@@ -434,15 +432,11 @@ class TestOAuthRefreshToken(unittest.TestCase):
         self.assertNotEqual(body["access_token"], old_session)
         self.assertNotEqual(body["refresh_token"], refresh_tok)
 
-        # Old refresh token should be consumed
-        self.assertNotIn(refresh_tok, _refresh_tokens)
+        # Old refresh token should be consumed (pop returns None)
+        self.assertIsNone(ss.pop_refresh_token(refresh_tok))
 
         # Old session should be deleted
         store_instance.delete.assert_called_once_with(old_session)
-
-        # Clean up
-        for rt in list(_refresh_tokens.keys()):
-            del _refresh_tokens[rt]
 
 
 class TestDynamicClientRegistration(unittest.TestCase):
@@ -456,7 +450,7 @@ class TestDynamicClientRegistration(unittest.TestCase):
         self.assertEqual(result.status_code, 400)
 
     def test_valid_registration_returns_client_id(self):
-        from mcp_oauth import oauth_register, _registered_clients
+        from mcp_oauth import oauth_register
         request = MagicMock()
         request.json = AsyncMock(return_value={
             "client_name": "Claude Desktop",
@@ -474,10 +468,6 @@ class TestDynamicClientRegistration(unittest.TestCase):
         self.assertEqual(body["client_name"], "Claude Desktop")
         self.assertEqual(body["redirect_uris"], ["http://localhost/callback"])
         self.assertGreater(len(body["client_id"]), 20)
-
-        # Clean up
-        if body["client_id"] in _registered_clients:
-            del _registered_clients[body["client_id"]]
 
     def test_invalid_json_returns_400(self):
         from mcp_oauth import oauth_register
@@ -504,11 +494,13 @@ class TestMCPOAuthCallback(unittest.TestCase):
 
     @patch("mcp_oauth.httpx.AsyncClient")
     def test_mcp_callback_redirects_to_claude(self, mock_client_cls):
-        from mcp_oauth import mcp_oauth_callback, _auth_codes
+        from mcp_oauth import mcp_oauth_callback, _state_store
+
+        ss = _state_store()
 
         # Plant a pending MCP authorization
         internal_state = "mcp-internal-state"
-        _auth_codes[internal_state] = {
+        ss.put_auth_code(internal_state, {
             "type": "pending",
             "client_id": "test-client",
             "redirect_uri": "http://localhost/callback",
@@ -516,7 +508,7 @@ class TestMCPOAuthCallback(unittest.TestCase):
             "code_challenge": "test-challenge",
             "scope": "read",
             "created_at": time.time(),
-        }
+        })
 
         # Mock SF token exchange
         mock_response = MagicMock()
@@ -543,23 +535,19 @@ class TestMCPOAuthCallback(unittest.TestCase):
         self.assertIn("code=", location)
         self.assertIn("state=claude-state", location)
 
-        # Clean up generated auth codes
-        codes_to_remove = [k for k, v in _auth_codes.items() if v.get("type") == "code"]
-        for k in codes_to_remove:
-            del _auth_codes[k]
-
 
 class TestAuthCodeSingleUse(unittest.TestCase):
     """Verify authorization codes are single-use."""
 
     @patch("mcp_oauth.get_token_store")
     def test_code_cannot_be_reused(self, mock_store):
-        from mcp_oauth import oauth_token, _auth_codes, _refresh_tokens
+        from mcp_oauth import oauth_token, _state_store
 
         verifier, challenge = _generate_pkce()
+        ss = _state_store()
 
         auth_code = "single-use-code"
-        _auth_codes[auth_code] = {
+        ss.put_auth_code(auth_code, {
             "type": "code",
             "client_id": "test-client",
             "redirect_uri": "http://localhost/callback",
@@ -568,7 +556,7 @@ class TestAuthCodeSingleUse(unittest.TestCase):
             "sf_refresh_token": "sf-refresh",
             "sf_instance_url": "https://myorg.my.salesforce.com",
             "created_at": time.time(),
-        }
+        })
 
         store_instance = MagicMock()
         mock_store.return_value = store_instance
@@ -594,10 +582,6 @@ class TestAuthCodeSingleUse(unittest.TestCase):
         import json
         body = json.loads(result2.body)
         self.assertEqual(body["error"], "invalid_grant")
-
-        # Clean up
-        for rt in list(_refresh_tokens.keys()):
-            del _refresh_tokens[rt]
 
 
 # ===================================================================
@@ -679,21 +663,19 @@ class TestDCRRedirectUriValidation(unittest.TestCase):
 
     def test_registered_client_must_match_uris(self):
         """If client is DCR-registered, redirect_uri must match registered URIs."""
-        from mcp_oauth import _validate_redirect_uri_for_client, _registered_clients
+        from mcp_oauth import _validate_redirect_uri_for_client, _state_store
 
+        ss = _state_store()
         client_id = "test-dcr-client-validate"
-        _registered_clients[client_id] = {
+        ss.put_client(client_id, {
             "redirect_uris": ["https://app.example.com/callback"],
             "created_at": time.time(),
-        }
+        })
 
-        try:
-            # Matching URI — accepted
-            self.assertTrue(_validate_redirect_uri_for_client(client_id, "https://app.example.com/callback"))
-            # Non-matching URI — rejected even if scheme is valid
-            self.assertFalse(_validate_redirect_uri_for_client(client_id, "https://evil.com/callback"))
-        finally:
-            del _registered_clients[client_id]
+        # Matching URI — accepted
+        self.assertTrue(_validate_redirect_uri_for_client(client_id, "https://app.example.com/callback"))
+        # Non-matching URI — rejected even if scheme is valid
+        self.assertFalse(_validate_redirect_uri_for_client(client_id, "https://evil.com/callback"))
 
     def test_unregistered_client_validated_by_scheme(self):
         """Unregistered clients have their redirect_uri validated by scheme."""
@@ -732,14 +714,14 @@ class TestMemoryLimits(unittest.TestCase):
 
     def test_max_pending_codes_enforced(self):
         """Exceeding MAX_PENDING_CODES returns 429."""
-        from mcp_oauth import oauth_authorize, _auth_codes, MAX_PENDING_CODES
+        from mcp_oauth import oauth_authorize, _state_store, MAX_PENDING_CODES
 
         _, challenge = _generate_pkce()
+        ss = _state_store()
 
-        # Fill up _auth_codes to the limit
-        original_codes = dict(_auth_codes)
+        # Fill up auth codes to the limit
         for i in range(MAX_PENDING_CODES):
-            _auth_codes[f"fake-code-{i}"] = {"created_at": time.time(), "type": "pending"}
+            ss.put_auth_code(f"fake-code-{i}", {"created_at": time.time(), "type": "pending"})
 
         try:
             request = _make_request(query_params={
@@ -751,17 +733,17 @@ class TestMemoryLimits(unittest.TestCase):
             result = asyncio.get_event_loop().run_until_complete(oauth_authorize(request))
             self.assertEqual(result.status_code, 429)
         finally:
-            # Restore original state
-            _auth_codes.clear()
-            _auth_codes.update(original_codes)
+            # Cleanup: pop all fake codes
+            for i in range(MAX_PENDING_CODES):
+                ss.pop_auth_code(f"fake-code-{i}")
 
     def test_max_registered_clients_enforced(self):
         """Exceeding MAX_REGISTERED_CLIENTS returns 429."""
-        from mcp_oauth import oauth_register, _registered_clients, MAX_REGISTERED_CLIENTS
+        from mcp_oauth import oauth_register, _state_store, MAX_REGISTERED_CLIENTS
 
-        original_clients = dict(_registered_clients)
+        ss = _state_store()
         for i in range(MAX_REGISTERED_CLIENTS):
-            _registered_clients[f"fake-client-{i}"] = {"created_at": time.time()}
+            ss.put_client(f"fake-client-{i}", {"created_at": time.time()})
 
         try:
             request = MagicMock()
@@ -772,31 +754,29 @@ class TestMemoryLimits(unittest.TestCase):
             result = asyncio.get_event_loop().run_until_complete(oauth_register(request))
             self.assertEqual(result.status_code, 429)
         finally:
-            _registered_clients.clear()
-            _registered_clients.update(original_clients)
+            # InMemoryOAuthStateStore — access internal dict for cleanup
+            if hasattr(ss, '_clients'):
+                for i in range(MAX_REGISTERED_CLIENTS):
+                    ss._clients.pop(f"fake-client-{i}", None)
 
-    def test_expired_refresh_tokens_cleaned_up(self):
-        """Expired refresh tokens are removed by cleanup."""
-        from mcp_oauth import _refresh_tokens, _cleanup_expired_refresh_tokens, SESSION_TTL_SECONDS
+    def test_refresh_token_single_use(self):
+        """Refresh tokens are consumed on use (single-use)."""
+        from mcp_oauth import _state_store
 
-        # Add an old refresh token (older than 2x TTL)
-        _refresh_tokens["old-refresh"] = {
-            "session_token": "old-session",
-            "created_at": time.time() - (SESSION_TTL_SECONDS * 3),
-        }
-        # Add a fresh refresh token
-        _refresh_tokens["fresh-refresh"] = {
-            "session_token": "fresh-session",
+        ss = _state_store()
+        ss.put_refresh_token("test-rt-single", {
+            "session_token": "test-session",
             "created_at": time.time(),
-        }
+        }, ttl=86400)
 
-        _cleanup_expired_refresh_tokens()
+        # First pop — should succeed
+        data = ss.pop_refresh_token("test-rt-single")
+        self.assertIsNotNone(data)
+        self.assertEqual(data["session_token"], "test-session")
 
-        self.assertNotIn("old-refresh", _refresh_tokens)
-        self.assertIn("fresh-refresh", _refresh_tokens)
-
-        # Clean up
-        del _refresh_tokens["fresh-refresh"]
+        # Second pop — should return None (consumed)
+        data2 = ss.pop_refresh_token("test-rt-single")
+        self.assertIsNone(data2)
 
 
 class TestClientNameSanitization(unittest.TestCase):
@@ -828,7 +808,7 @@ class TestSFRedirectUriFromEnv(unittest.TestCase):
 
     def test_authorize_uses_env_redirect_uri(self):
         """The SF OAuth redirect must use SF_OAUTH_REDIRECT_URI env var."""
-        from mcp_oauth import oauth_authorize, _auth_codes
+        from mcp_oauth import oauth_authorize
 
         _, challenge = _generate_pkce()
         # Use a spoofed X-Forwarded-Host — should NOT affect SF redirect
@@ -851,13 +831,7 @@ class TestSFRedirectUriFromEnv(unittest.TestCase):
         # SF redirect_uri param should use env var, NOT the spoofed host
         self.assertNotIn("evil-spoofed-host", location)
         # Should contain the configured redirect URI from env
-        redirect_uri_encoded = "redirect_uri=" + os.environ.get("SF_OAUTH_REDIRECT_URI", "").replace(":", "%3A").replace("/", "%2F")
         self.assertIn("redirect_uri=", location)
-
-        # Clean up pending auth codes created by this test
-        codes_to_remove = [k for k, v in _auth_codes.items() if v.get("type") == "pending"]
-        for k in codes_to_remove:
-            del _auth_codes[k]
 
 
 if __name__ == "__main__":

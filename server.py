@@ -87,7 +87,21 @@ logger.info("Registered %d MCP tools", len(ALL_TOOLS))
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    result = {"status": "ok"}
+
+    # Redis health (if configured)
+    redis_url = os.environ.get("REDIS_URL")
+    if redis_url:
+        try:
+            import redis as _redis
+            r = _redis.Redis.from_url(redis_url, socket_connect_timeout=2, socket_timeout=2)
+            r.ping()
+            result["redis"] = "connected"
+        except Exception as exc:
+            result["redis"] = f"error: {exc}"
+            result["status"] = "degraded"
+
+    return JSONResponse(result)
 
 
 # ---------------------------------------------------------------------------
