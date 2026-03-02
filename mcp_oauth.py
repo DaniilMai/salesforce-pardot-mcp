@@ -30,7 +30,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 
-from token_store import get_token_store, UserTokens
+from token_store import get_token_store, get_oauth_state_store, UserTokens
 from oauth import (
     _validate_instance_url,
     detect_pardot_business_unit_id,
@@ -57,17 +57,11 @@ DCR_MAX_REQUESTS_PER_MINUTE = 10
 _dcr_request_timestamps: dict[str, list[float]] = defaultdict(list)
 
 # ---------------------------------------------------------------------------
-# In-memory stores
+# State store (Redis when REDIS_URL is set, otherwise in-memory fallback)
 # ---------------------------------------------------------------------------
 
-# Authorization codes: code -> { sf_tokens, client_id, redirect_uri, code_challenge, state, created_at }
-_auth_codes: dict[str, dict] = {}
-
-# Dynamic client registrations: client_id -> { client_name, redirect_uris, created_at }
-_registered_clients: dict[str, dict] = {}
-
-# Refresh tokens: refresh_token -> { session_token, created_at }
-_refresh_tokens: dict[str, dict] = {}
+def _state_store():
+    return get_oauth_state_store()
 
 # ---------------------------------------------------------------------------
 # Allowed redirect URI schemes (FIX #6: scheme validation)
@@ -95,21 +89,8 @@ def _get_server_url(request: Request) -> str:
     return f"{request.url.scheme}://{request.url.netloc}"
 
 
-def _cleanup_expired_codes() -> None:
-    """Remove expired authorization codes."""
-    now = time.time()
-    expired = [c for c, data in _auth_codes.items() if now - data["created_at"] > AUTH_CODE_TTL_SECONDS]
-    for c in expired:
-        del _auth_codes[c]
-
-
-def _cleanup_expired_refresh_tokens() -> None:
-    """Remove refresh tokens older than 2x session TTL (FIX #4)."""
-    now = time.time()
-    max_age = SESSION_TTL_SECONDS * 2
-    expired = [rt for rt, data in _refresh_tokens.items() if now - data["created_at"] > max_age]
-    for rt in expired:
-        del _refresh_tokens[rt]
+# Cleanup is handled by Redis TTL or InMemoryOAuthStateStore internally.
+# These wrappers exist only for the capacity checks below.
 
 
 def verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -149,7 +130,7 @@ def _validate_redirect_uri_for_client(client_id: str, redirect_uri: str) -> bool
     If client is registered, redirect_uri must match one of the registered URIs.
     If client is not registered (public client), just validate the scheme.
     """
-    client = _registered_clients.get(client_id)
+    client = _state_store().get_client(client_id)
     if client is not None:
         return redirect_uri in client["redirect_uris"]
     # Unregistered client — allow if scheme is valid
@@ -261,10 +242,10 @@ async def oauth_authorize(request: Request) -> RedirectResponse | JSONResponse:
             status_code=503,
         )
 
-    _cleanup_expired_codes()
+    store = _state_store()
 
     # FIX #2: Enforce MAX_PENDING_CODES limit
-    if len(_auth_codes) >= MAX_PENDING_CODES:
+    if store.auth_code_count() >= MAX_PENDING_CODES:
         return JSONResponse(
             {"error": "server_error", "error_description": "Too many pending authorization requests, try again later"},
             status_code=429,
@@ -276,7 +257,7 @@ async def oauth_authorize(request: Request) -> RedirectResponse | JSONResponse:
     internal_state = secrets.token_urlsafe(32)
 
     # Store pending authorization
-    _auth_codes[internal_state] = {
+    store.put_auth_code(internal_state, {
         "type": "pending",
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -284,7 +265,7 @@ async def oauth_authorize(request: Request) -> RedirectResponse | JSONResponse:
         "code_challenge": code_challenge,
         "scope": scope,
         "created_at": time.time(),
-    }
+    }, ttl=AUTH_CODE_TTL_SECONDS)
 
     # FIX #5: Use configured SF_OAUTH_REDIRECT_URI from env instead of
     # constructing dynamically from request headers (prevents mismatch
@@ -322,12 +303,13 @@ async def mcp_oauth_callback(request: Request):
         return None  # Fall through to legacy handler
 
     # Check if this is an MCP OAuth flow
-    pending = _auth_codes.get(state)
+    store = _state_store()
+    pending = store.get_auth_code(state)
     if pending is None or pending.get("type") != "pending":
         return None  # Not an MCP flow — fall through to legacy
 
-    # Remove pending entry
-    del _auth_codes[state]
+    # Remove pending entry (single-use)
+    store.delete_auth_code(state)
 
     # Check expiry
     if time.time() - pending["created_at"] > AUTH_CODE_TTL_SECONDS:
@@ -375,7 +357,7 @@ async def mcp_oauth_callback(request: Request):
     # Generate authorization code for Claude Desktop
     auth_code = secrets.token_urlsafe(48)
 
-    _auth_codes[auth_code] = {
+    store.put_auth_code(auth_code, {
         "type": "code",
         "client_id": pending["client_id"],
         "redirect_uri": pending["redirect_uri"],
@@ -385,7 +367,7 @@ async def mcp_oauth_callback(request: Request):
         "sf_instance_url": instance_url,
         "sf_pardot_buid": pardot_buid,
         "created_at": time.time(),
-    }
+    }, ttl=AUTH_CODE_TTL_SECONDS)
 
     logger.info("MCP OAuth: auth code generated, redirecting to client")
 
@@ -443,10 +425,8 @@ async def _handle_authorization_code(form) -> JSONResponse:
             status_code=400,
         )
 
-    _cleanup_expired_codes()
-
     # Look up and consume the authorization code (single-use)
-    code_data = _auth_codes.pop(code, None)
+    code_data = _state_store().pop_auth_code(code)
     if code_data is None or code_data.get("type") != "code":
         return JSONResponse(
             {"error": "invalid_grant", "error_description": "Invalid or expired authorization code"},
@@ -501,12 +481,11 @@ async def _handle_authorization_code(form) -> JSONResponse:
     )
     store.put(session_token, tokens)
 
-    # FIX #4: Store refresh token with timestamp for cleanup
-    _cleanup_expired_refresh_tokens()
-    _refresh_tokens[refresh_token] = {
+    # Store refresh token (Redis TTL = 2x session TTL)
+    _state_store().put_refresh_token(refresh_token, {
         "session_token": session_token,
         "created_at": time.time(),
-    }
+    }, ttl=SESSION_TTL_SECONDS * 2)
 
     logger.info("MCP OAuth: session created via token exchange")
 
@@ -527,8 +506,8 @@ async def _handle_refresh_token(form) -> JSONResponse:
             status_code=400,
         )
 
-    # FIX #4: Updated structure — dict with session_token + created_at
-    rt_data = _refresh_tokens.pop(refresh_token, None)
+    # Atomic pop — consumed single-use
+    rt_data = _state_store().pop_refresh_token(refresh_token)
     if rt_data is None:
         return JSONResponse(
             {"error": "invalid_grant", "error_description": "Invalid refresh token"},
@@ -604,12 +583,11 @@ async def _handle_refresh_token(form) -> JSONResponse:
     # Remove old session
     store.delete(old_session_token)
 
-    # FIX #4: Store refresh token with timestamp
-    _cleanup_expired_refresh_tokens()
-    _refresh_tokens[new_refresh_token] = {
+    # Store new refresh token (Redis TTL = 2x session TTL)
+    _state_store().put_refresh_token(new_refresh_token, {
         "session_token": new_session_token,
         "created_at": time.time(),
-    }
+    }, ttl=SESSION_TTL_SECONDS * 2)
 
     logger.info("MCP OAuth: session refreshed")
 
@@ -673,8 +651,10 @@ async def oauth_register(request: Request) -> JSONResponse:
                 status_code=400,
             )
 
+    store = _state_store()
+
     # FIX #3: Enforce MAX_REGISTERED_CLIENTS limit
-    if len(_registered_clients) >= MAX_REGISTERED_CLIENTS:
+    if store.client_count() >= MAX_REGISTERED_CLIENTS:
         return JSONResponse(
             {"error": "server_error", "error_description": "Maximum number of registered clients reached"},
             status_code=429,
@@ -683,14 +663,14 @@ async def oauth_register(request: Request) -> JSONResponse:
     # Generate client credentials
     client_id = secrets.token_urlsafe(32)
 
-    _registered_clients[client_id] = {
+    store.put_client(client_id, {
         "client_name": client_name,
         "redirect_uris": redirect_uris,
         "grant_types": grant_types,
         "response_types": response_types,
         "token_endpoint_auth_method": token_endpoint_auth_method,
         "created_at": time.time(),
-    }
+    })
 
     logger.info("MCP OAuth: registered client (id=%s...)", client_id[:8])
 

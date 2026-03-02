@@ -72,12 +72,19 @@ class PardotClient:
         """
         Get a fresh access token.
 
-        Per-user mode: reads from token store.
+        Per-user mode: ensures SF token is fresh (proactive refresh),
+        then reads from token store.
         Legacy mode: reads from shared Salesforce client session_id.
         """
         # Try per-user OAuth tokens first
         store = get_token_store()
         if self._api_key and store:
+            # Ensure the SF access_token is actually fresh before reading it.
+            # Without this, a Pardot 401-retry would just re-read the same
+            # expired token from the store.
+            from tools.salesforce import ensure_fresh_sf_token
+            ensure_fresh_sf_token(self._api_key)
+
             tokens = store.get(self._api_key)
             if tokens:
                 self._token = tokens["access_token"]

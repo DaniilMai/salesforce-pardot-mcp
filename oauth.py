@@ -24,7 +24,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from token_store import get_token_store, UserTokens
+from token_store import get_token_store, get_oauth_state_store, UserTokens
 
 # ---------------------------------------------------------------------------
 # Allowed Salesforce instance URL suffixes
@@ -121,15 +121,8 @@ async def detect_pardot_business_unit_id(
 _STATE_TTL_SECONDS = 600  # 10 minutes
 _MAX_PENDING_STATES = 100
 
-_pending_states: dict[str, float] = {}
-
-
-def _cleanup_expired_states() -> None:
-    """Remove expired pending states to prevent memory leak."""
-    now = time.time()
-    expired = [s for s, ts in _pending_states.items() if now - ts > _STATE_TTL_SECONDS]
-    for s in expired:
-        del _pending_states[s]
+def _oauth_state_store():
+    return get_oauth_state_store()
 
 
 def _token_fingerprint(token: str) -> str:
@@ -158,16 +151,16 @@ async def oauth_login(request: Request) -> RedirectResponse:
             status_code=503,
         )
 
-    _cleanup_expired_states()
+    state_store = _oauth_state_store()
 
-    if len(_pending_states) >= _MAX_PENDING_STATES:
+    if state_store.oauth_state_count() >= _MAX_PENDING_STATES:
         return JSONResponse(
             {"error": "Too many pending authorization requests, try again later"},
             status_code=429,
         )
 
     state = secrets.token_urlsafe(32)
-    _pending_states[state] = time.time()
+    state_store.put_oauth_state(state, time.time(), ttl=_STATE_TTL_SECONDS)
 
     params = {
         "response_type": "code",
@@ -447,7 +440,7 @@ async def oauth_callback(request: Request) -> HTMLResponse:
             status_code=400,
         )
 
-    created_at = _pending_states.pop(state, None)
+    created_at = _oauth_state_store().pop_oauth_state(state)
     if created_at is None:
         return HTMLResponse(
             _ERROR_HTML.format(error_message="Invalid or expired session. Please try again."),
