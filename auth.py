@@ -34,6 +34,8 @@ MAX_REQUESTS_PER_MINUTE = 60
 # ---------------------------------------------------------------------------
 
 _valid_keys: set[str] | None = None
+_valid_keys_loaded_at: float = 0.0
+_KEYS_REFRESH_TTL = 300  # Re-read TEAM_API_KEYS every 5 minutes
 
 
 def _load_api_keys() -> set[str]:
@@ -46,10 +48,12 @@ def _load_api_keys() -> set[str]:
 
 
 def get_valid_keys() -> set[str]:
-    """Lazy-load and cache valid API keys (parsed once, reused forever)."""
-    global _valid_keys
-    if _valid_keys is None:
+    """Load and cache valid API keys with TTL-based refresh (every 5 minutes)."""
+    global _valid_keys, _valid_keys_loaded_at
+    now = time.monotonic()
+    if _valid_keys is None or (now - _valid_keys_loaded_at) >= _KEYS_REFRESH_TTL:
         _valid_keys = _load_api_keys()
+        _valid_keys_loaded_at = now
     return _valid_keys
 
 

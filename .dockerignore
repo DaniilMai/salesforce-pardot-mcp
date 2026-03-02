@@ -1,0 +1,43 @@
+# Environment and secrets
+.env
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+
+# Encrypted token data (runtime — created inside container)
+data/
+*.enc
+
+# SSL certificates (local dev)
+certs/
+*.pem
+*.key
+
+# Internal docs
+CLAUDE.md
+.claude/
+
+# Git
+.git/
+.gitignore
+
+# OS files
+.DS_Store
+
+# Pytest
+.pytest_cache/
+
+# Test Dockerfile (not needed in production image)
+Dockerfile.test
+tests/
