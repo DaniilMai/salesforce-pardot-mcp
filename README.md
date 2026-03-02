@@ -31,7 +31,7 @@ Claude Desktop handles token management (acquire, store, refresh) automatically 
 
 One Connected App on the server handles all users across all Salesforce organizations.
 
-## Available Tools (16 read-only + 5 write)
+## Available Tools (17 read-only + 5 write)
 
 The server runs in **read-only mode by default**. Write tools (update/create) are only registered when `ENABLE_WRITE_TOOLS=true` is set.
 
@@ -65,6 +65,7 @@ The server runs in **read-only mode by default**. Write tools (update/create) ar
 | `pardot_get_form_handlers` | read | List all form handlers |
 | `pardot_get_emails` | read | List email templates and sends |
 | `pardot_get_lifecycle_history` | read | Get lifecycle stage progression for a prospect |
+| `pardot_set_business_unit` | read | Set Pardot Business Unit ID for the current session |
 
 ## Security
 
@@ -86,6 +87,7 @@ The server runs in **read-only mode by default**. Write tools (update/create) ar
 | **Token encryption** | Per-user OAuth tokens encrypted at rest with Fernet (AES-128-CBC) |
 | **Instance URL validation** | Only `*.salesforce.com` and `*.force.com` domains accepted |
 | **Input sanitization** | Client names sanitized (control chars stripped, length limited) |
+| **Header injection protection** | Pardot Business Unit ID validated as alphanumeric before use in HTTP headers |
 
 ## Prerequisites
 
@@ -217,9 +219,9 @@ token_store.py         # Fernet-encrypted per-user OAuth token storage
 oauth.py               # Self-service OAuth flow (/login, /callback, /status, /revoke)
 mcp_oauth.py           # MCP-native OAuth (metadata, authorize, token, register, PKCE)
 tools/
-  __init__.py          # Re-exports ALL_TOOLS list (16 read + 5 write, write opt-in)
+  __init__.py          # Re-exports ALL_TOOLS list (17 read + 5 write, write opt-in)
   salesforce.py        # 10 Salesforce tools (SOQL, CRUD, pipeline, activities)
-  pardot.py            # 11 Pardot tools (prospects, campaigns, activities, emails)
+  pardot.py            # 12 Pardot tools (prospects, campaigns, activities, emails, config)
 tests/
   test_security.py     # Unit tests — SOQL injection, field protection, auth, rate limiting
   test_oauth.py        # OAuth flow tests — login redirect, callback, status, revoke
