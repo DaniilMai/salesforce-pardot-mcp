@@ -395,14 +395,109 @@ async def pardot_add_prospect_to_list(
 # Activity tools
 # ---------------------------------------------------------------------------
 
+# Pardot visitor activity type codes → (label, category)
+ACTIVITY_TYPES: dict[int, tuple[str, str]] = {
+    1:  ("Click", "web"),
+    2:  ("View", "web"),
+    3:  ("Error", "web"),
+    4:  ("Success", "web"),
+    5:  ("Session", "web"),
+    6:  ("Email Sent", "email"),
+    7:  ("Site Search", "web"),
+    8:  ("Opportunity Created", "opportunity"),
+    9:  ("Opportunity Won", "opportunity"),
+    10: ("Opportunity Lost", "opportunity"),
+    11: ("Email Open", "email"),
+    12: ("Unsubscribe", "email"),
+    13: ("Bounce", "email"),
+    14: ("Spam Complaint", "email"),
+    15: ("Email Preference", "email"),
+    16: ("Opt In", "email"),
+    17: ("Third Party Click", "email"),
+    18: ("Opportunity Reopen", "opportunity"),
+    19: ("Opportunity Linked", "opportunity"),
+    20: ("Visit", "web"),
+    21: ("Custom Redirect Click", "web"),
+    35: ("Indirect Unsubscribe", "email"),
+    36: ("Indirect Bounce", "email"),
+    37: ("Indirect Opt In", "email"),
+    38: ("Opportunity Unlinked", "opportunity"),
+}
+
+# Friendly name → type code (allows filtering by name instead of code)
+ACTIVITY_TYPE_NAMES: dict[str, int] = {
+    # Web
+    "click": 1, "view": 2, "form_view": 2, "page_view": 2,
+    "error": 3, "form_error": 3,
+    "success": 4, "form_success": 4, "form_submit": 4,
+    "session": 5, "site_search": 7, "visit": 20,
+    "custom_redirect": 21,
+    # Email
+    "email_sent": 6, "email_open": 11, "unsubscribe": 12,
+    "bounce": 13, "spam": 14, "email_preference": 15,
+    "opt_in": 16, "third_party_click": 17,
+    "indirect_unsubscribe": 35, "indirect_bounce": 36, "indirect_opt_in": 37,
+    # Opportunity
+    "opportunity_created": 8, "opportunity_won": 9, "opportunity_lost": 10,
+    "opportunity_reopen": 18, "opportunity_linked": 19, "opportunity_unlinked": 38,
+}
+
+
+def _enrich_activity(activity: dict) -> dict:
+    """Add activityLabel and category fields based on the numeric type code."""
+    type_code = activity.get("type")
+    if type_code is not None and type_code in ACTIVITY_TYPES:
+        label, category = ACTIVITY_TYPES[type_code]
+        activity["activityLabel"] = label
+        activity["category"] = category
+    return activity
+
 
 async def pardot_get_visitor_activities(
     prospect_id: Annotated[str | None, Field(description="Filter by Pardot prospect ID")] = None,
-    activity_type: Annotated[int | None, Field(description="Activity type code (1=click, 2=view, 6=form, 11=email open, etc.)")] = None,
+    activity_type: Annotated[int | None, Field(
+        description=(
+            "Filter by numeric activity type code. "
+            "Web: 1=Click, 2=View, 3=Error, 4=Success/FormSubmit, 5=Session, "
+            "7=SiteSearch, 20=Visit, 21=CustomRedirect. "
+            "Email: 6=Sent, 11=Open, 12=Unsubscribe, 13=Bounce, 14=Spam, "
+            "15=Preference, 16=OptIn, 17=ThirdPartyClick. "
+            "Opportunity: 8=Created, 9=Won, 10=Lost, 18=Reopen, 19=Linked."
+        )
+    )] = None,
+    activity_type_name: Annotated[str | None, Field(
+        description=(
+            "Filter by friendly name instead of numeric code. "
+            "Web: click, view, form_view, page_view, error, form_error, "
+            "success, form_success, form_submit, session, site_search, visit, custom_redirect. "
+            "Email: email_sent, email_open, unsubscribe, bounce, spam, "
+            "email_preference, opt_in, third_party_click. "
+            "Opportunity: opportunity_created, opportunity_won, opportunity_lost, "
+            "opportunity_reopen, opportunity_linked, opportunity_unlinked."
+        )
+    )] = None,
     created_after: Annotated[str | None, Field(description="Only activities after this datetime (ISO 8601)")] = None,
     created_before: Annotated[str | None, Field(description="Only activities before this datetime (ISO 8601)")] = None,
 ) -> dict:
-    """Get Pardot visitor activities with optional filters for prospect, type, and date range."""
+    """Get Pardot visitor activities with optional filters for prospect, type, and date range.
+
+    Each activity is enriched with 'activityLabel' (human-readable name) and
+    'category' (web / email / opportunity) for easier analysis.
+
+    Use activity_type_name for friendly filtering (e.g. 'form_submit', 'email_open')
+    or activity_type for the raw numeric code.
+    """
+    # Resolve friendly name to code (activity_type_name takes precedence if both given)
+    resolved_type = activity_type
+    if activity_type_name is not None:
+        name_lower = activity_type_name.strip().lower()[:50]  # cap length before lookup
+        if name_lower not in ACTIVITY_TYPE_NAMES:
+            raise ToolError(
+                f"Unknown activity_type_name: {name_lower!r}. "
+                f"Valid names: {', '.join(sorted(ACTIVITY_TYPE_NAMES))}"
+            )
+        resolved_type = ACTIVITY_TYPE_NAMES[name_lower]
+
     client = get_pardot_client()
     params: dict[str, Any] = {
         "fields": "id,prospectId,type,typeName,details,campaignId,createdAt",
@@ -410,20 +505,20 @@ async def pardot_get_visitor_activities(
     if prospect_id:
         _validate_numeric_id(prospect_id, "prospect_id")
         params["prospectId"] = prospect_id
-    if activity_type is not None:
-        params["type"] = str(activity_type)
+    if resolved_type is not None:
+        params["type"] = str(resolved_type)
     if created_after:
         params["createdAfter"] = created_after
     if created_before:
         params["createdBefore"] = created_before
 
     result = await client.get("visitor-activities", params=params)
-    activities = result.get("values", [])
+    activities = [_enrich_activity(a) for a in result.get("values", [])]
     _warn_large_result("pardot_get_visitor_activities", len(activities))
     truncated = len(activities) > MAX_RESULT_RECORDS
     if truncated:
         activities = activities[:MAX_RESULT_RECORDS]
-    output = {"activities": activities, "_dataSource": "pardot"}
+    output: dict[str, Any] = {"activities": activities, "_dataSource": "pardot"}
     if truncated:
         output["warning"] = f"Result truncated to {MAX_RESULT_RECORDS} records. Use filters to narrow your query."
     return output

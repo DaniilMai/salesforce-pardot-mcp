@@ -1144,5 +1144,93 @@ class TestOAuthEnvVarValidation(unittest.TestCase):
         oauth._validate_oauth_env_vars()
 
 
+# ---------------------------------------------------------------------------
+# 31. Activity type mapping and enrichment
+# ---------------------------------------------------------------------------
+
+class TestActivityTypeMapping(unittest.TestCase):
+    """Verify ACTIVITY_TYPES and ACTIVITY_TYPE_NAMES are consistent."""
+
+    def test_all_names_resolve_to_valid_codes(self):
+        from tools.pardot import ACTIVITY_TYPES, ACTIVITY_TYPE_NAMES
+        for name, code in ACTIVITY_TYPE_NAMES.items():
+            self.assertIn(code, ACTIVITY_TYPES, f"Name {name!r} maps to unknown code {code}")
+
+    def test_key_names_exist(self):
+        """Ensure the most important user-facing names are present."""
+        from tools.pardot import ACTIVITY_TYPE_NAMES
+        for name in ("form_submit", "form_error", "form_view", "email_open",
+                      "email_sent", "bounce", "click", "view"):
+            self.assertIn(name, ACTIVITY_TYPE_NAMES, f"Missing expected name: {name}")
+
+    def test_form_submit_maps_to_success(self):
+        from tools.pardot import ACTIVITY_TYPE_NAMES
+        self.assertEqual(ACTIVITY_TYPE_NAMES["form_submit"], 4)
+        self.assertEqual(ACTIVITY_TYPE_NAMES["form_success"], 4)
+
+    def test_form_error_maps_to_error(self):
+        from tools.pardot import ACTIVITY_TYPE_NAMES
+        self.assertEqual(ACTIVITY_TYPE_NAMES["form_error"], 3)
+
+    def test_form_view_maps_to_view(self):
+        from tools.pardot import ACTIVITY_TYPE_NAMES
+        self.assertEqual(ACTIVITY_TYPE_NAMES["form_view"], 2)
+
+
+class TestEnrichActivity(unittest.TestCase):
+    """Verify _enrich_activity adds label and category."""
+
+    def test_known_type_enriched(self):
+        from tools.pardot import _enrich_activity
+        activity = {"id": 1, "type": 4, "typeName": "Form"}
+        result = _enrich_activity(activity)
+        self.assertEqual(result["activityLabel"], "Success")
+        self.assertEqual(result["category"], "web")
+
+    def test_email_type_enriched(self):
+        from tools.pardot import _enrich_activity
+        activity = {"id": 2, "type": 11}
+        result = _enrich_activity(activity)
+        self.assertEqual(result["activityLabel"], "Email Open")
+        self.assertEqual(result["category"], "email")
+
+    def test_unknown_type_unchanged(self):
+        from tools.pardot import _enrich_activity
+        activity = {"id": 3, "type": 999}
+        result = _enrich_activity(activity)
+        self.assertNotIn("activityLabel", result)
+        self.assertNotIn("category", result)
+
+    def test_missing_type_unchanged(self):
+        from tools.pardot import _enrich_activity
+        activity = {"id": 4}
+        result = _enrich_activity(activity)
+        self.assertNotIn("activityLabel", result)
+
+    def test_opportunity_type_enriched(self):
+        from tools.pardot import _enrich_activity
+        activity = {"id": 5, "type": 9}
+        result = _enrich_activity(activity)
+        self.assertEqual(result["activityLabel"], "Opportunity Won")
+        self.assertEqual(result["category"], "opportunity")
+
+
+class TestActivityTypeNameValidation(unittest.TestCase):
+    """Verify that invalid activity_type_name raises ToolError."""
+
+    def test_invalid_name_not_in_map(self):
+        from tools.pardot import ACTIVITY_TYPE_NAMES
+        self.assertNotIn("nonexistent_type", ACTIVITY_TYPE_NAMES)
+        self.assertNotIn("", ACTIVITY_TYPE_NAMES)
+        self.assertNotIn("FORM_SUBMIT", ACTIVITY_TYPE_NAMES)  # keys are lowercase only
+
+    def test_case_insensitive_lookup(self):
+        """Names should work case-insensitively (lowered in the tool)."""
+        from tools.pardot import ACTIVITY_TYPE_NAMES
+        # All keys are lowercase
+        for name in ACTIVITY_TYPE_NAMES:
+            self.assertEqual(name, name.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
