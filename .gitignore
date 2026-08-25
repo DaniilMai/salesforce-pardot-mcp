@@ -24,9 +24,6 @@ certs/
 *.pem
 *.key
 
-# Internal docs
-CLAUDE.md
-.claude/
 
 # Pip artifact
 =42.0.0
