@@ -1,8 +1,25 @@
 # Salesforce + Pardot MCP Server
 
+[![CI](https://github.com/DaniilMai/salesforce-pardot-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/DaniilMai/salesforce-pardot-mcp/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![MCP](https://img.shields.io/badge/protocol-MCP-8A2BE2)](https://modelcontextprotocol.io/)
+
 A remote [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server providing Salesforce CRM and Pardot (Marketing Cloud Account Engagement) tools over SSE transport. Built with [FastMCP](https://github.com/jlowin/fastmcp), designed for deployment on [Railway](https://railway.app/).
 
 Users connect via **MCP OAuth 2.1** — Claude Desktop handles authentication automatically with zero configuration.
+
+## Why This Exists
+
+A GTM team lives in Salesforce and Pardot all day, but most questions — "show open pipeline by stage", "which prospects opened the last campaign email but never submitted a form", "what did this account do on the site last week" — still require dashboards, exports, or someone who writes SOQL. This server makes both systems directly queryable from any MCP client, in plain language.
+
+Design decisions that shaped it:
+
+- **Read-only by default.** Write tools exist but are opt-in via an environment flag — a model can never mutate CRM data unless the operator explicitly allows it.
+- **Multi-tenant by design.** One deployment serves any number of users across any number of Salesforce orgs; each user's OAuth tokens are encrypted at rest and isolated per session.
+- **Full MCP OAuth 2.1 Authorization Server in-repo.** Dynamic Client Registration (RFC 7591), authorization server metadata (RFC 8414), protected resource metadata (RFC 9728), and PKCE S256 — no third-party auth service, no shared API keys, zero client-side configuration.
+
+In production on Railway since January 2026 — before Salesforce shipped an official MCP server — serving a 20+ person GTM team and saving each user hours of manual CRM reporting every week.
 
 ## How It Works
 
@@ -15,7 +32,24 @@ Users connect via **MCP OAuth 2.1** — Claude Desktop handles authentication au
 
 Claude Desktop handles token management (acquire, store, refresh) automatically via PKCE-secured OAuth. One Connected App on the server handles all users across all Salesforce organizations.
 
-## Available Tools (17 read-only + 5 write)
+## Example
+
+A typical question and the tool calls it turns into (synthetic data):
+
+```
+User: which prospects opened last week's campaign email but never submitted a form?
+
+→ pardot_get_emails                                        # locate last week's send
+→ pardot_get_visitor_activities(activity_type_name="email_open")
+→ pardot_get_visitor_activities(activity_type_name="form_submit")
+
+Answer: 34 prospects opened "Q3 Product Update" and never submitted a form.
+        Top 5 by score: ...
+```
+
+No dashboard, no export, no SOQL — the model composes the tools on its own.
+
+## Available Tools (22 — writes are opt-in)
 
 The server runs in **read-only mode by default**. Write tools (update/create) are only registered when `ENABLE_WRITE_TOOLS=true` is set.
 
@@ -49,7 +83,9 @@ The server runs in **read-only mode by default**. Write tools (update/create) ar
 | `pardot_get_form_handlers` | read | List all form handlers |
 | `pardot_get_emails` | read | List email templates and sends |
 | `pardot_get_lifecycle_history` | read | Get lifecycle stage progression for a prospect |
-| `pardot_set_business_unit` | read | Set Pardot Business Unit ID for the current session |
+| `pardot_set_business_unit` | config | Set Pardot Business Unit ID for the current session |
+
+> **config** — mutates only the current session's settings, never Salesforce or Pardot data; always registered. **write** — mutates CRM data; registered only behind `ENABLE_WRITE_TOOLS=true`.
 
 ### Visitor Activity Types
 
@@ -63,6 +99,35 @@ The server runs in **read-only mode by default**. Write tools (update/create) ar
 
 Each returned activity is enriched with `activityLabel` and `category` fields.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    CLIENT["MCP client<br/>(Claude Desktop, etc.)"]
+
+    subgraph SERVER["FastMCP server — Railway"]
+        AS["MCP OAuth 2.1<br/>Authorization Server<br/>(DCR + PKCE S256)"]
+        MW["Bearer auth middleware<br/>+ rate limiting"]
+        TOOLS["17 + 5 tools<br/>sf_* / pardot_*<br/>(write opt-in)"]
+        TS[("Token store<br/>Fernet-encrypted,<br/>per user")]
+    end
+
+    SF["Salesforce<br/>REST + SOQL"]
+    PD["Pardot API v5"]
+
+    CLIENT -- "1 · OAuth 2.1 flow" --> AS
+    AS -- "OAuth proxy:<br/>code exchange / refresh" --> SF
+    AS -- "2 · session token" --> CLIENT
+    AS --> TS
+    CLIENT -- "3 · SSE + Bearer" --> MW
+    MW --> TOOLS
+    TOOLS <--> TS
+    TOOLS --> SF
+    TOOLS --> PD
+```
+
+The Authorization Server acts as an OAuth proxy to Salesforce: it exchanges and refreshes tokens against Salesforce's own OAuth endpoints, then stores them per user. Each tool request resolves the session token to a user, decrypts that user's Salesforce tokens, and calls the underlying APIs with them — the server itself holds no org-wide credentials beyond the Connected App used for the OAuth handshake.
+
 ## Security
 
 | Feature | Details |
@@ -75,7 +140,7 @@ Each returned activity is enriched with `activityLabel` and `category` fields.
 | **SKIP_AUTH restriction** | `SKIP_AUTH` only works in stdio mode (local), ignored for remote SSE |
 | **Rate limiting** | 60 requests/minute per token (sliding window) |
 | **DCR rate limiting** | 10 requests/minute per IP for client registration |
-| **Memory limits** | Auth codes (500), registered clients (200), refresh tokens (1000) capped to prevent DoS |
+| **Memory limits** | Auth codes (500) and registered clients (200) capped to prevent DoS; refresh tokens expired after 2× session TTL |
 | **Security headers** | HSTS, X-Content-Type-Options, X-Frame-Options, CSP `default-src 'none'`, Cache-Control `no-store` |
 | **SOQL injection protection** | User input escaped before inclusion in queries |
 | **Read-only enforcement** | `sf_query` only accepts SELECT statements |
@@ -84,7 +149,7 @@ Each returned activity is enriched with `activityLabel` and `category` fields.
 | **Pardot ID validation** | Numeric-only validation on prospect/list IDs prevents path injection |
 | **Error truncation** | API error messages capped at 200 chars to prevent org data leaks |
 | **Audit logging** | SHA-256 key fingerprint logged per request |
-| **Token encryption** | Per-user OAuth tokens encrypted at rest with Fernet (AES-128-CBC) |
+| **Token encryption** | Per-user OAuth tokens encrypted at rest with Fernet (AES-128-CBC + HMAC-SHA256 authenticated encryption) |
 | **HMAC cache keys** | Client cache uses HMAC-hashed keys to prevent raw token exposure in memory |
 | **Instance URL validation** | Only `*.salesforce.com`, `*.force.com`, `*.salesforce.mil`, `*.cloudforce.com` accepted |
 | **Input sanitization** | Client names sanitized (control chars stripped, length limited) |
@@ -158,6 +223,7 @@ docker run -p 8000:8000 --env-file .env sf-mcp
 | `PORT` | No | Server port (default: `8000`) |
 | `ENABLE_WRITE_TOOLS` | No | Set to `true` to enable write tools (default: disabled, read-only mode) |
 | `SESSION_TTL_SECONDS` | No | Session token lifetime in seconds (default: `86400` — 24 hours) |
+| `SKIP_AUTH` | No | Dev only: bypass auth in local stdio mode. Ignored on remote SSE transport |
 
 Generate an encryption key:
 
@@ -168,6 +234,8 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 See `.env.example` for a full template with comments.
 
 ## Running Tests
+
+Unit and OAuth suites (170 tests) run in CI on every push to `main` and every pull request — see the badge above. Integration tests start a real server subprocess and are meant to be run locally.
 
 ```bash
 # Unit tests (no Salesforce connection needed)
@@ -207,6 +275,12 @@ railway.toml           # Railway deployment config
 requirements.txt       # Python dependencies
 .env.example           # Environment variable template
 ```
+
+## Limitations
+
+- **OAuth session state is in-memory.** Session tokens, pending auth codes, and DCR-registered clients live in process memory: a redeploy logs users out, and reconnecting is one OAuth click. Per-user Salesforce tokens do survive restarts — they persist in a Fernet-encrypted file on disk.
+- **Deliberately single-instance.** In-memory session state means no horizontal scaling; a Redis-backed store is in progress on the `feature/redis-token-refresh` branch.
+- **API limits are your org's limits.** The server adds its own rate limiting (60 req/min per token) but Salesforce/Pardot daily API quotas belong to the operator's org.
 
 ## License
 
